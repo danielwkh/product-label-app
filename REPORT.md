@@ -502,7 +502,7 @@ cd tools
 npm install                # fake-indexeddb、jsdom、miniflare
 node stress-test.mjs       # 舊版重現 + 新版壓測（T1–T12）
 node ui-smoke.mjs          # JSDOM：真實 DOM 綁定 + 174 檔匯入 + 搜尋
-node api-integration.mjs   # Miniflare：真 SQLite + R2，17 項 API 檢查
+node api-integration.mjs   # Miniflare：真 SQLite + R2，23 項 API 檢查（含 meta/ETag/revision）
 node bench-real-catalog.mjs            # 用線上真實商品目錄量測新舊配對成本（可加 products.json 參數）
 ```
 
@@ -518,7 +518,7 @@ npx wrangler pages dev . --d1 DB=product-label-app --r2 LABELS
 
 1. **iOS 前景限制**：本機階段已把每個檔案縮到 4ms 級別，但 174 × 1.5MB 的寫入仍受裝置 I/O 限制。若使用者常在鎖屏狀態下匯入，建議用「雲端優先」模式（設定裡可手動選擇），讓 PDF 直接進 R2。
 2. **伺服器端配對**（可選）：目前配對在 Worker 完成後用 `POST /api/labels/sync` 上傳結果。若要完全免除手機 CPU 負擔，可把 `matcher.js` 直接搬到 Pages Function 執行「上傳後自動配對」；架構上已預留（`labels/sync` 就是同一個資料介面）。
-3. **分頁載入商品**：目前 bootstrap 一次回傳全部商品（22,481 筆約 2–3MB JSON）。已可運作，但商品數再翻倍時建議改成 `/api/products?since=` 增量同步。
+3. **商品載入**：bootstrap 仍是一次回傳全部商品（22,481 筆約 2–3MB JSON），但**只在 revision 變動時才發生**：平常開頁只讀 2 列 meta。商品數再翻倍時建議改成 `/api/products?since=` 增量同步（介面已預留 revision）。
    另外索引建立（22k 商品約 0.9 秒）在 Worker 內完成；只有 Worker 不可用時才會退回主執行緒（且延後到第一次真正需要配對時才建立，不會卡在啟動階段）。
 4. **PDF 指紋取樣**：目前用「大小 + 頭/中/尾各 128KB」，對同一份 PDF 重新掃描、重新命名後的去重仍有效；若需要「跨檔名」去重，可改成完整檔案 SHA-256（成本較高）。
 
@@ -562,3 +562,73 @@ D1 欄位         content_hash / size 已自動補上（bootstrap 回傳 hash �
 ```
 
 > 部署未動到任何既有資料：商品 22,481 筆、既有 2 筆舊格式標籤都保持原樣。
+
+---
+
+## 11. 事故與修正：D1 免費額度用盡（2026-11-19）
+
+### 症狀
+
+1. 手機開啟網站，紅色橫幅顯示「雲端 API 尚未啟用」——但 Cloudflare 設定完全正常。
+2. 之後 `/api/health` 回 `D1_ERROR: Your account has exceeded D1's free tier daily row read limit`，
+   `/api/bootstrap` 回 `error code: 1101`。
+
+### 兩個真正的原因
+
+**原因 A（誤判，前端）：** `loadCloudData()` 把「雲端 bootstrap」與「寫入本機 IndexedDB 快取」
+包在同一個 `try` 裡。iOS 上單一交易寫 22,481 筆會超過 60 秒逾時 → 例外 → `catch` 把
+`state.cloudEnabled` 設成 `false`，於是畫面顯示「雲端 API 尚未啟用」，而且按「同步」會直接中止。
+資料其實完全沒問題，是錯誤訊息騙了操作者。
+
+**原因 B（真的把額度燒完，後端）：** 免費方案每天 5,000,000 列讀取。
+
+| 動作 | 舊版讀取列數 | 新版讀取列數 |
+|---|---|---|
+| `/api/health`（每 8 秒被 deploy verify 輪詢） | 約 45,000（兩次 `COUNT(*)` 掃 22,481 列） | **2** |
+| 每次開啟頁面 `/api/bootstrap` | 22,481 | 0（revision 相同時不呼叫） |
+| 每次開啟頁面的版本檢查 | — | **2**（`/api/meta`） |
+| 標籤清單 | 22,481 + 標籤 | 只有標籤（數十列） |
+| 同 revision 再次 bootstrap | 22,481 | 0（邊緣快取／ETag 304） |
+
+以 5,000,000 ÷ 22,481 ≈ **220 次全量 bootstrap／天**，再加上 verify 每 8 秒的 `COUNT(*)`，
+額度在半天內就會用完。用完之後**任何**讀取都會失敗，所以 App 看起來像「雲端沒設定」。
+
+### 修正
+
+1. **後端** `functions/api/[[path]].js`
+   - 新增 `meta` 表（`products_revision` / `labels_revision`），寫入商品或標籤時 `bumpRevision()`。
+   - `/api/health` 只讀 2 列 meta，**全檔已無 `COUNT(*)`**。
+   - 新增 `/api/meta`（2 列）、`/api/labels`（只有標籤）。
+   - `bootstrap` 用 `revision` 當 ETag 與 `caches.default` 邊緣快取 key，支援 `If-None-Match → 304`
+     （304 不會讀商品表）。
+2. **前端** `js/app.js`
+   - 開頁先打 `/api/meta`；revision 與本機記錄相同 → **直接用本機快取**（只補抓標籤），完全不碰商品表。
+   - revision 不同才 `bootstrap`，並把新 revision 寫進 IndexedDB（`cloudRevision`）。
+   - 本機快取寫入改成獨立 `try`：失敗只顯示「本機快取寫入失敗（不影響雲端）」，
+     絕不再把 `cloudEnabled` 設回 `false`。
+   - 商品快照分塊寫入（`saveProductsChunked`），並用簽章比對避免每次重寫 22,481 筆。
+3. **錯誤訊息** `js/store/api.js`：D1 錯誤會翻成
+   「雲端資料庫暫時不可用（D1 免費額度每日 UTC 午夜重置，或可升級方案）」，
+   不再讓人誤會是「沒啟用」。
+4. **部署驗證** `tools/deploy.mjs`：等待上線只輪詢靜態 `index.html`（**0 次 D1 讀取**），
+   驗證階段只查一次資料筆數。
+5. **資料庫**：`schema.sql` 與 `migrations/0003_meta_revision.sql` 只新增 `meta` 表，
+   **不動 products / labels 既有資料**（`CREATE TABLE IF NOT EXISTS` + `INSERT OR IGNORE`）。
+
+### 測試（全部通過）
+
+```
+tools/cloud-smoke.mjs       7 個情境、20 項斷言  ✅（含「重開頁不重抓 22,481 列」、「revision 變動才重抓」）
+tools/api-integration.mjs   23 / 23             ✅（含 /api/meta 不含商品、ETag 304、revision 遞增）
+tools/ui-smoke.mjs                              ✅（174 檔、搜尋、配對管理）
+tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、暫停/繼續、去重）
+```
+
+### 給使用者的結論
+
+- 這次「雲端沒啟用」是**前端錯誤處理**造成的誤報，不是 Cloudflare 設定問題；已修正。
+- 帳號的 **D1 免費每日列讀取額度**在事發當天已用完，UTC 午夜（香港時間早上 8 點）自動重置。
+  重置前雲端資料讀不到，App 會用本機快取運作。
+- 修正後一次正常開頁只需 **約 2–4 列讀取**（原本 22,481 列），
+  等同每天可開頁數從約 220 次提升到數十萬次級別。
+- 若仍想完全避免免費額度風險：Cloudflare 方案升級到 Workers Paid（D1 讀取額度大幅提高）。
