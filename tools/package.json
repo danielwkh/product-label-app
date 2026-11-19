@@ -4,10 +4,15 @@
   "type": "module",
   "description": "測試工具（不會部署到 Cloudflare Pages）",
   "scripts": {
-    "test": "node tools/stress-test.mjs"
+    "test": "node stress-test.mjs",
+    "test:ui": "node ui-smoke.mjs",
+    "test:cloud": "node cloud-smoke.mjs",
+    "test:api": "node api-integration.mjs"
   },
   "devDependencies": {
-    "fake-indexeddb": "^6.0.0"
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^26.0.0",
+    "miniflare": "^3.2025000.0"
   },
   "dependencies": {
     "jsdom": "^29.1.1",

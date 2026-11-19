@@ -190,6 +190,47 @@ export async function replaceProducts(list) {
   }, { timeout: 60000 });
 }
 
+export async function clearProducts() {
+  return withTx('products', 'readwrite', tx => {
+    tx.objectStore('products').clear();
+  }, { timeout: 30000 });
+}
+
+export async function countProducts() {
+  return withTx('products', 'readonly', tx => requestAsPromise(tx.objectStore('products').count()));
+}
+
+/**
+ * 大量商品寫入：清空後「分塊、逐塊 transaction、塊與塊之間讓出主執行緒」。
+ * 舊做法（單一 transaction 寫 2 萬多筆）在 iPhone 上有機會超過 60 秒逾時，
+ * 一旦逾時整份快取就沒寫進去，還會被上層誤判成「雲端不可用」。
+ */
+export async function saveProductsChunked(list, options = {}) {
+  const chunkSize = options.chunkSize || 800;
+  const onProgress = options.onProgress || null;
+  const yieldFn = options.yieldFn || null;
+  await clearProducts();
+  let written = 0;
+  let failedChunks = 0;
+  for (let i = 0; i < list.length; i += chunkSize) {
+    const chunk = list.slice(i, i + chunkSize);
+    try {
+      await withTx('products', 'readwrite', tx => {
+        const store = tx.objectStore('products');
+        for (const product of chunk) store.put(product);
+      }, { timeout: 15000 });
+      written += chunk.length;
+    } catch (err) {
+      failedChunks++;
+      console.warn('[db] 商品分塊寫入失敗', i, err && err.message);
+      if (failedChunks > 3) throw err;
+    }
+    if (onProgress) onProgress(written, list.length);
+    if (yieldFn) await yieldFn();
+  }
+  return { written, failedChunks };
+}
+
 /** 只更新部分商品（配對結果），不再整表重寫。 */
 export async function putProducts(list, chunkSize = 200) {
   for (let i = 0; i < list.length; i += chunkSize) {
