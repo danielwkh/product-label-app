@@ -58,7 +58,8 @@ const title = msg => console.log(`\n${C.bold}${C.cyan}${msg}${C.reset}`);
 
 function run(cmd, argv, options = {}) {
   if (DRY) {
-    console.log(`  ${C.dim}[dry-run]${C.reset} ${cmd} ${argv.join(' ')}`);
+    const shown = argv.map(a => (/extraheader|github_pat_|ghp_/i.test(a) ? '<已隱藏>' : a));
+    console.log(`  ${C.dim}[dry-run]${C.reset} ${cmd} ${shown.join(' ')}`);
     return { ok: true, stdout: '' };
   }
   const result = spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: options.capture === false ? 'inherit' : 'pipe' });
@@ -328,7 +329,32 @@ async function cmdGithub() {
 
   ensureRemote();
   const before = git(['rev-parse', '--short', 'HEAD']).stdout;
-  const push = run('git', ['push', 'origin', `HEAD:${BRANCH}`]);
+
+  // token 來源（都不會寫入 shell history 或 .git/config）：
+  //   --token-stdin  從標準輸入讀取（建議：echo 不會留下記錄）
+  //   --token-env    從環境變數 GITHUB_TOKEN / GH_TOKEN 讀取
+  let authArgs = [];
+  let tokenSource = '';
+  if (flag('token-stdin', false)) {
+    try {
+      const token = readFileSync(0, 'utf8').trim();
+      if (token) {
+        const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+        authArgs = ['-c', `http.https://github.com/.extraheader=Authorization: Basic ${basic}`];
+        tokenSource = 'stdin';
+      }
+    } catch { /* 沒有 stdin 就忽略 */ }
+  } else if (flag('token-env', false)) {
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+    if (token) {
+      const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+      authArgs = ['-c', `http.https://github.com/.extraheader=Authorization: Basic ${basic}`];
+      tokenSource = 'env';
+    }
+  }
+  if (tokenSource) info(`使用 ${tokenSource} 提供的 token 推送（不會寫入 .git/config）`);
+
+  const push = run('git', [...authArgs, 'push', 'origin', `HEAD:${BRANCH}`]);
   if (!push.ok) {
     bad(`push 失敗：${push.stderr || push.stdout}`);
     console.log(`
