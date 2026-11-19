@@ -521,3 +521,44 @@ npx wrangler pages dev . --d1 DB=product-label-app --r2 LABELS
 3. **分頁載入商品**：目前 bootstrap 一次回傳全部商品（22,481 筆約 2–3MB JSON）。已可運作，但商品數再翻倍時建議改成 `/api/products?since=` 增量同步。
    另外索引建立（22k 商品約 0.9 秒）在 Worker 內完成；只有 Worker 不可用時才會退回主執行緒（且延後到第一次真正需要配對時才建立，不會卡在啟動階段）。
 4. **PDF 指紋取樣**：目前用「大小 + 頭/中/尾各 128KB」，對同一份 PDF 重新掃描、重新命名後的去重仍有效；若需要「跨檔名」去重，可改成完整檔案 SHA-256（成本較高）。
+
+---
+
+## 10. 部署記錄
+
+| 項目 | 內容 |
+|---|---|
+| 部署時間 | 2026-11-19（UTC+8 下午） |
+| 推送 commit | `5890bac`、`89c5d26`、`d7026c2`（`9e0352f → main`，fast-forward） |
+| 部署方式 | GitHub push → Cloudflare Pages 自動建置 |
+| 驗證結果 | `node tools/deploy.mjs verify` **全綠** |
+
+驗證項目（正式站 `https://product-label-app.pages.dev`）：
+
+```
+✅ index.html 是新版（含匯入進度 UI）
+✅ 已註冊 sw-v6.js
+✅ /js/app.js 47,260 字元 · /js/core/pipeline.js 21,059 字元
+✅ /js/core/match.worker.js · /js/core/matcher.js · /sw-v6.js 內容正確
+✅ vendor：pdf.min.mjs / pdf.worker.min.mjs / xlsx.full.min.js / html5-qrcode.min.js 全部 200
+✅ /api/health：products 22481 / labels 2 / r2 true
+✅ 商品數 22481 → 22481（+0）
+✅ 標籤數 2 → 2（+0）
+✅ Range 請求回 206（bytes 0-1023/67981）
+```
+
+正式環境端到端自我測試（建立 → 重複上傳 → 批次配對同步 → 下載 → Range → 刪除）：
+
+```
+起始            labels 2
+上傳            ok, deduped=false
+重複上傳        ok, deduped=true      ← R2 未重寫、D1 未新增列
+批次配對同步    ok, count=1
+下載            200, 2048 bytes
+Range           206, bytes 0-99/2048
+建立後          labels 3
+刪除後          labels 2              ← 測試資料完全清除
+D1 欄位         content_hash / size 已自動補上（bootstrap 回傳 hash 欄位）
+```
+
+> 部署未動到任何既有資料：商品 22,481 筆、既有 2 筆舊格式標籤都保持原樣。

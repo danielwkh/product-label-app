@@ -427,8 +427,10 @@ async function cmdVerify() {
   const page = await fetchText('/');
   if (/id="jobList"/.test(page.text)) ok('index.html 是新版（含匯入進度 UI）');
   else bad('index.html 仍是舊版');
-  if (/sw-v6\.js/.test(page.text)) ok('已註冊 sw-v6.js');
+  const appText = (await fetchText('/js/app.js')).text;
+  if (/sw-v6\.js/.test(page.text) || /sw-v6\.js/.test(appText)) ok('已註冊 sw-v6.js');
   else bad('尚未註冊 sw-v6.js（舊 Service Worker 會繼續 cache-first）');
+  if (/sw-v[45]\.js|'\.\/sw\.js'/.test(page.text + appText)) bad('仍有程式碼註冊舊版 Service Worker');
 
   const ASSETS = [
     ['/js/app.js', 'createImportPipeline'],
@@ -444,6 +446,21 @@ async function cmdVerify() {
     else if (isHtml) bad(`${asset} 回傳的是 index.html（檔案不存在，被 SPA fallback 接走）`);
     else if (!assetResponse.text.includes(marker)) bad(`${asset} 內容不含預期標記「${marker}」`);
     else ok(`${asset} 正確（${assetResponse.text.length.toLocaleString()} 字元）`);
+  }
+
+  title('1b. 前端相依檔（vendor）');
+  for (const [asset, marker] of [
+    ['/vendor/pdfjs/pdf.min.mjs', 'pdfjs'],
+    ['/vendor/pdfjs/pdf.worker.min.mjs', 'pdfjs'],
+    ['/vendor/xlsx.full.min.js', 'XLSX'],
+    ['/vendor/html5-qrcode.min.js', 'Html5Qrcode']
+  ]) {
+    const assetResponse = await fetchText(asset);
+    const isHtml = /^\s*<!DOCTYPE/i.test(assetResponse.text);
+    if (assetResponse.status !== 200) bad(`${asset} 回應 ${assetResponse.status}`);
+    else if (isHtml) bad(`${asset} 回傳 index.html（檔案不存在）`);
+    else if (marker && !assetResponse.text.includes(marker)) warn(`${asset} 內容找不到「${marker}」（可能仍是可用檔案）`);
+    else ok(`${asset} 正確（${(assetResponse.text.length / 1024).toFixed(0)}K 字元）`);
   }
 
   title('2. API');
