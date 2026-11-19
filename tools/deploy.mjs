@@ -178,8 +178,12 @@ function checkGit() {
 
 /* ------------------------------------------------------------ 3. 正式站現況 */
 
+const isD1Quota = text => /D1_ERROR|exceeded|1101/i.test(text || '');
+const routeExists = async path => (await fetchText(path)).status !== 404;
+
 async function readLive() {
   const health = await fetchText('/api/health');
+  const metaRoute = await fetchText('/api/meta');
   const page = await fetchText('/');
   const bootstrap = await fetchText('/api/bootstrap');
   const out = {
@@ -189,6 +193,9 @@ async function readLive() {
     bootstrapVersion: null,
     products: null,
     labels: null,
+    healthStatus: health.status,
+    hasMetaRoute: metaRoute.status !== 404,
+    healthError: isD1Quota(health.text) ? health.text.slice(0, 200) : null,
     hasJobsUi: /id="jobList"/.test(page.text || ''),
     serving: page.status,
     htmlBytes: (page.text || '').length
@@ -215,17 +222,31 @@ async function checkLive({ strict = false } = {}) {
   if (live.hasJobsUi) ok('已部署新版的匯入進度 UI');
   else warn('正式站仍是舊版 index.html（尚未部署本次改動）');
 
+  if (live.hasMetaRoute) ok('Functions 是新版（/api/meta 路由存在）');
+  else warn('Functions 還是舊版（沒有 /api/meta，部署後才會有）');
+
   if (live.health && live.health.ok) {
     ok(`/api/health 正常（D1 ${live.health.products} 商品 / ${live.health.labels} 標籤）`);
   } else if (live.health === null || live.health.error) {
-    // 部署前仍是舊版 Functions，/api/health 不存在是正常的
-    const message = '尚未有 /api/health → 這是舊版 Functions（部署後才會有）';
-    if (strict) bad(message); else warn(message);
+    if (live.healthStatus === 404) {
+      const message = '尚未有 /api/health → 這是舊版 Functions（部署後才會有）';
+      if (strict) bad(message); else warn(message);
+    } else if (live.healthError) {
+      // 路由存在但 D1 讀不到：幾乎一定是免費方案每日列讀取額度用完（UTC 午夜重置）
+      warn('API 可連線，但 D1 今天讀不到資料');
+      warn(`  原因：${live.healthError.slice(0, 140)}`);
+      warn('  處理：等 UTC 午夜（香港 08:00）重置，或升級 Cloudflare Workers Paid');
+      warn('  影響：網站可用，但雲端同步暫時不可用；本機資料不受影響');
+    } else {
+      const message = `尚未有 /api/health（HTTP ${live.healthStatus}）→ 可能是舊版 Functions`;
+      if (strict) bad(message); else warn(message);
+    }
   } else {
     bad(`/api/health 回報異常：${JSON.stringify(live.health)}`);
   }
 
   if (live.products != null) ok(`bootstrap：products ${live.products} / labels ${live.labels}`);
+  else if (live.healthError) warn('bootstrap 讀不到資料：D1 免費額度用完（不是程式問題）');
   else warn('bootstrap 無法解析（可能是舊版 API 或 D1 未設定）');
 
   try {
@@ -469,13 +490,21 @@ async function cmdVerify() {
   const health = await fetchText('/api/health');
   let healthJson = null;
   try { healthJson = JSON.parse(health.text); } catch { /* ignore */ }
-  if (healthJson && healthJson.ok) ok(`/api/health 正常：products ${healthJson.products} / labels ${healthJson.labels} / r2 ${healthJson.r2}`);
-  else bad(`/api/health 異常：${health.text.slice(0, 120)}`);
+  if (healthJson && healthJson.ok) {
+    ok(`/api/health 正常：products ${healthJson.products} / labels ${healthJson.labels} / r2 ${healthJson.r2}`);
+    if (healthJson.productsRevision) info(`products_revision ${healthJson.productsRevision} / labels_revision ${healthJson.labelsRevision}`);
+  } else if (isD1Quota(health.text)) {
+    warn('/api/health 路由存在（新 Functions 已上線），但 D1 免費額度用完，讀不到資料');
+    warn('  → 這不是部署失敗；UTC 午夜（香港 08:00）重置，或升級 Workers Paid');
+  } else {
+    bad(`/api/health 異常：${health.text.slice(0, 120)}`);
+  }
 
   title('3. 資料沒有變少（只查一次，避免消耗 D1 row read）');
   const live = await readLive();
   if (live.products == null) {
-    bad('bootstrap 無法解析，無法比對資料筆數');
+    if (live.healthError) warn('D1 額度用完，今天無法比對資料筆數（等重置後再跑一次 verify）');
+    else bad('bootstrap 無法解析，無法比對資料筆數');
   } else if (baseline && baseline.products != null) {
     const productDelta = live.products - baseline.products;
     const labelDelta = live.labels - baseline.labels;
