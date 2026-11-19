@@ -370,6 +370,36 @@ function manualLabelIdSet() {
 
 /* ------------------------------------------------------------------ 雲端 */
 
+function mergeRemoteLabels(remoteLabels) {
+  const merged = { ...state.labels };
+  for (const remote of remoteLabels) {
+    const local = merged[remote.id];
+    merged[remote.id] = {
+      id: remote.id,
+      filename: remote.filename,
+      nameFromFile: remote.nameFromFile || remote.filename,
+      hash: remote.hash || (local && local.hash) || null,
+      size: remote.size || (local && local.size) || 0,
+      productId: remote.productId ?? null,
+      matchedProductName: remote.matchedProductName || null,
+      matchSource: remote.matchSource || null,
+      matchScore: remote.matchScore ?? null,
+      matchConfidence: remote.matchConfidence || null,
+      matchGap: remote.matchGap ?? null,
+      matchWhy: remote.matchWhy || null,
+      uploadedAt: remote.uploadedAt || (local && local.uploadedAt) || nowISO(),
+      updatedAt: remote.updatedAt || null,
+      hasLocalBlob: Boolean(local && local.hasLocalBlob),
+      uploaded: true,
+      remote: true
+    };
+  }
+  state.labels = merged;
+  for (const label of Object.values(state.labels)) {
+    if (!label.uploaded) label.remote = false;
+  }
+}
+
 async function persistLocalSnapshot(products, onProgress) {
   if (state.localSnapshotWriter) return state.localSnapshotWriter(products);
   return db.saveProductsChunked(products, { chunkSize: 800, onProgress, yieldFn: yieldMain });
@@ -397,7 +427,41 @@ async function cloudRequestSafe(fn, label) {
 async function loadCloudData() {
   showStatus('cloudStatus', '連線雲端中…');
   try {
-    const data = await api.bootstrap();
+    // 1) 先用「便宜」的 revision 檢查（只讀 2 列），避免每次開頁都抓 22,481 列商品，
+    //    這同時是 D1 免費額度（500 萬列讀取/日）會不會被燒完的關鍵。
+    let meta = null;
+    try {
+      meta = await api.meta();
+    } catch (err) {
+      console.warn('[cloud] meta 檢查失敗，改用完整 bootstrap', err);
+    }
+
+    if (meta && meta.cloud) {
+      state.cloudEnabled = true;
+      state.cloudError = null;
+      const localRevision = await db.getMeta('cloudRevision');
+      const localCount = await db.countProducts();
+      const upToDate = localRevision === meta.revision && localCount === state.products.length && localCount > 0;
+
+      if (upToDate) {
+        // 商品沒有變動：只抓標籤（通常幾十列），完全不碰 22,481 列的商品表
+        try {
+          const labelData = await api.labelList();
+          mergeRemoteLabels(labelData.labels || []);
+          await db.putLabels(Object.values(state.labels), 40).catch(() => {});
+        } catch (err) {
+          console.warn('[cloud] 標籤同步失敗', err);
+        }
+        pipeline.setProducts(state.products);
+        pipeline.setLabels(state.labels);
+        matcher.setProducts(state.products);
+        matcher.setManualLabelIds(manualLabelIdSet());
+        showStatus('cloudStatus', `已連線雲端：${state.products.length.toLocaleString()} 個商品（本機快取）、${Object.keys(state.labels).length} 個標籤`);
+        return true;
+      }
+    }
+
+    const data = await api.bootstrap(meta && meta.revision);
     if (!data || !data.cloud) {
       state.cloudEnabled = false;
       state.cloudError = data && data.error ? data.error : '雲端 API 未啟用';
@@ -430,33 +494,7 @@ async function loadCloudData() {
       }]));
     }
 
-    const merged = { ...state.labels };
-    for (const remote of remoteLabels) {
-      const local = merged[remote.id];
-      merged[remote.id] = {
-        id: remote.id,
-        filename: remote.filename,
-        nameFromFile: remote.nameFromFile || remote.filename,
-        hash: remote.hash || (local && local.hash) || null,
-        size: remote.size || (local && local.size) || 0,
-        productId: remote.productId ?? null,
-        matchedProductName: remote.matchedProductName || null,
-        matchSource: remote.matchSource || null,
-        matchScore: remote.matchScore ?? null,
-        matchConfidence: remote.matchConfidence || null,
-        matchGap: remote.matchGap ?? null,
-        matchWhy: remote.matchWhy || null,
-        uploadedAt: remote.uploadedAt || (local && local.uploadedAt) || nowISO(),
-        updatedAt: remote.updatedAt || null,
-        hasLocalBlob: Boolean(local && local.hasLocalBlob),
-        uploaded: true,
-        remote: true
-      };
-    }
-    state.labels = merged;
-    for (const label of Object.values(state.labels)) {
-      if (!label.uploaded) label.remote = false;
-    }
+    mergeRemoteLabels(remoteLabels);
 
     pipeline.setProducts(state.products);
     pipeline.setLabels(state.labels);
@@ -493,6 +531,7 @@ async function loadCloudData() {
       }
     }
 
+    if (data && data.revision) await db.setMeta('cloudRevision', data.revision).catch(() => {});
     const base = hasRemote
       ? `已連線雲端：${state.products.length.toLocaleString()} 個商品、${Object.keys(state.labels).length} 個標籤`
       : '已連線雲端；雲端目前沒有資料，可同步本機資料';
@@ -605,6 +644,11 @@ async function syncAllToCloud() {
     await syncMatchMetadata();
     await refreshStateFromPipeline();
 
+    try {
+      const latest = await api.meta();
+      if (latest && latest.revision) await db.setMeta('cloudRevision', latest.revision);
+    } catch { /* 記不到 revision 只會讓下次多抓一次 bootstrap */ }
+
     const parts = [`商品 ${changed.length ? `已同步 ${changed.length.toLocaleString()} 筆` : '已是最新（無變動）'}`];
     if (queued || legacyUploaded) parts.push(`PDF 上傳 ${queued + legacyUploaded} 個`);
     showStatus('cloudStatus', `同步完成：${parts.join('、')}`);
@@ -679,6 +723,10 @@ async function importExcel(file) {
       }
     }
     await syncMatchMetadata();
+    try {
+      const latest = await api.meta();
+      if (latest && latest.revision) await db.setMeta('cloudRevision', latest.revision);
+    } catch { /* ignore */ }
   }
   showStatus('excelStatus', `成功載入 ${products.length} 個商品；已重新檢查 ${total} 個標籤，人工配對會保留`);
   toast('Excel 上傳成功');

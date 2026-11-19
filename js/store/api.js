@@ -32,9 +32,17 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       '雲端請求逾時'
     );
     let body = null;
-    try { body = await response.json(); } catch { /* 可能不是 JSON */ }
+    let rawText = '';
+    try { body = await response.json(); } catch {
+      // Cloudflare 在 D1 出錯時可能直接回傳純文字（例如 error code: 1101）
+      try { rawText = (await response.clone().text()).slice(0, 200).trim(); } catch { /* ignore */ }
+    }
     if (!response.ok) {
-      throw new ApiError((body && body.error) || `雲端 API ${response.status}`, response.status, body);
+      let message = (body && body.error) || rawText || `雲端 API ${response.status}`;
+      if (/D1|1101|exceeded/i.test(message)) {
+        message = `${message}｜雲端資料庫暫時不可用（D1 免費額度每日 UTC 午夜重置，或可升級方案）`;
+      }
+      throw new ApiError(message, response.status, body);
     }
     return body;
   }
@@ -42,8 +50,18 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
   return {
     request,
 
-    async bootstrap() {
-      return request('bootstrap', { timeoutMs: 60000 });
+    /** 便宜版本檢查：只讀 2 列 meta，不要用它抓商品 */
+    async meta() {
+      return request('meta', { timeoutMs: 20000 });
+    },
+
+    async labelList() {
+      return request('labels', { timeoutMs: 30000 });
+    },
+
+    async bootstrap(revision) {
+      const suffix = revision ? `?rev=${encodeURIComponent(revision)}` : '';
+      return request(`bootstrap${suffix}`, { timeoutMs: 60000 });
     },
 
     async productsBulk(products, { replace = false } = {}) {

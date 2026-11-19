@@ -37,3 +37,15 @@ CREATE INDEX IF NOT EXISTS idx_products_barcode2 ON products(barcode2);
 CREATE INDEX IF NOT EXISTS idx_labels_product_id ON labels(product_id);
 CREATE INDEX IF NOT EXISTS idx_labels_content_hash ON labels(content_hash);
 CREATE INDEX IF NOT EXISTS idx_labels_uploaded ON labels(uploaded_at);
+
+-- ---------------------------------------------------------------------------
+-- meta：資料版本號（用來避免每次開頁都整表讀取商品，省 D1 row read 額度）
+-- API 也會在需要時自動建立（ensureMetaTable），這裡只是讓全新資料庫一次到位。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO meta (key, value, updated_at) VALUES ('products_revision', '1', datetime('now'));
+INSERT OR IGNORE INTO meta (key, value, updated_at) VALUES ('labels_revision', '1', datetime('now'));

@@ -47,7 +47,8 @@ const remoteLabels = [
   }
 ];
 
-const calls = { bootstrap: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0 };
+const calls = { bootstrap: 0, meta: 0, labelList: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0 };
+let revision = '1.1';
 let bootstrapDelay = 0;
 let failBootstrap = false;
 
@@ -59,6 +60,16 @@ globalThis.fetch = async (url, options = {}) => {
   });
   await new Promise(r => setTimeout(r, 5));
 
+  if (target.includes('/api/meta')) {
+    calls.meta++;
+    if (failBootstrap) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
+    return json({ cloud: true, productsRevision: '1', labelsRevision: '1', revision });
+  }
+  if (target.includes('/api/labels') && (!options.method || options.method === 'GET')) {
+    calls.labelList++;
+    if (failBootstrap) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
+    return json({ labels: remoteLabels, cloud: true });
+  }
   if (target.includes('/api/bootstrap')) {
     calls.bootstrap++;
     if (bootstrapDelay) await new Promise(r => setTimeout(r, bootstrapDelay));
@@ -127,6 +138,16 @@ check('本機 IndexedDB 商品數 = 22,481（分塊寫入）', stored === 22481,
 const signature = await db.getMeta('productsSignature');
 check('已記下商品快照簽章（下次啟動可跳過重寫）', Boolean(signature), String(signature));
 
+/* --------------------------------- 情境 1b：再次開頁不應重抓 22,481 列商品 */
+
+console.log('\n=== 情境 1b：revision 沒變時，重開頁面不抓全量商品 ===');
+const bootstrapBefore = calls.bootstrap;
+await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 400));
+check('沒有再呼叫 bootstrap（0 次全表讀取）', calls.bootstrap === bootstrapBefore, `bootstrap=${calls.bootstrap - bootstrapBefore}`);
+check('改用便宜的 meta + labels', calls.meta > 0 && calls.labelList > 0);
+check('狀態顯示已連線（使用本機快取）', /已連線雲端/.test(statusText()), statusText());
+
 /* --------------------------------------------- 情境 2：同步只送有變動的商品 */
 
 console.log('\n=== 情境 2：按「同步」只送有變動的商品 ===');
@@ -147,6 +168,7 @@ check('改 1 筆商品只送 1 筆', calls.productsBulkRows === 1, `送了 ${cal
 /* ------------------------------------ 情境 3：本機快取寫入失敗不可影響雲端狀態 */
 
 console.log('\n=== 情境 3：本機離線快取寫入失敗 ===');
+revision = '3.1';                                            // 雲端有更新 → 走完整 bootstrap，才會寫本機快取
 await db.setMeta('productsSignature', 'stale-on-purpose');   // 強制重新寫入本機快取
 window.app.state.localSnapshotWriter = () => { throw new Error('模擬 IndexedDB 逾時（60s）'); };
 await window.app.reloadCloud();
@@ -162,6 +184,15 @@ document.getElementById('syncCloudBtn').dispatchEvent(new window.Event('click'))
 await new Promise(r => setTimeout(r, 800));
 check('此時按同步仍可運作（不再誤報未啟用）', !/尚未啟用/.test(statusText()), statusText());
 check('同步不會把 22,481 筆全部重送', calls.productsBulkRows <= 1, `送了 ${calls.productsBulkRows} 筆`);
+
+/* --------------------------------------- 情境 3b：revision 變了才重抓全量 */
+
+console.log('\n=== 情境 3b：雲端商品有變動時才重抓 ===');
+revision = '2.1';
+const bootstrapBefore2 = calls.bootstrap;
+await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 800));
+check('revision 變動 → 重新 bootstrap 一次', calls.bootstrap === bootstrapBefore2 + 1, `bootstrap=${calls.bootstrap - bootstrapBefore2}`);
 
 /* ------------------------------------------ 情境 4：真的連不上時訊息要正確 */
 

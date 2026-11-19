@@ -158,15 +158,47 @@ check('一次請求更新 174 筆配對', syncBody.ok && matchedRows.n === 174, 
 check('商品 label_id 同步連結', linkedProducts.n === 174, `${linkedProducts.n} 個商品有標籤`);
 
 /* 7. bootstrap */
-console.log('\n=== 7. bootstrap ===');
+console.log('\n=== 7. 便宜的版本檢查（meta / labels / ETag）===');
+response = await api.onRequestGet({ request: request('/api/meta'), env });
+const meta = await response.json();
+check('/api/meta 只回版本資訊（不含商品陣列）', (meta.cloud === true || meta.ok === true) && Boolean(meta.revision) && !('products' in meta), JSON.stringify(meta));
+check('/api/meta 帶出 products/labels revision', Boolean(meta.productsRevision) && Boolean(meta.labelsRevision), `${meta.productsRevision}/${meta.labelsRevision}`);
+
+const beforeRev = meta.productsRevision;
+
+response = await api.onRequestGet({ request: request('/api/labels'), env });
+const labelOnly = await response.json();
+check('/api/labels 只回標籤、不含商品', Array.isArray(labelOnly.labels) && !('products' in labelOnly), `${labelOnly.labels.length} 標籤`);
+
+console.log('\n=== 7b. bootstrap 的 ETag / 304 ===');
+response = await api.onRequestGet({ request: request('/api/bootstrap'), env });
+const etag = response.headers.get('etag');
+const revHeader = response.headers.get('x-data-revision');
+check('bootstrap 回 ETag 與 revision', Boolean(etag) && Boolean(revHeader), `${etag} rev=${revHeader}`);
+response = await api.onRequestGet({
+  request: new Request(`http://localhost/api/bootstrap`, { headers: { 'if-none-match': etag } }),
+  env
+});
+check('相同 revision 帶 If-None-Match 回 304（不再讀商品表）', response.status === 304, `status=${response.status}`);
+
+console.log('\n=== 7c. bootstrap ===');
 response = await api.onRequestGet({ request: request('/api/bootstrap'), env });
 const boot = await response.json();
 check('bootstrap 回傳商品、標籤與 hash', boot.products.length === 1200 && boot.labels.length === 174 && Boolean(boot.labels[0].hash), `${boot.products.length} 商品 / ${boot.labels.length} 標籤`);
 
+console.log('\n=== 7d. 寫入商品後 revision 會變 ===');
+await api.onRequestPost({
+  request: request('/api/products/bulk', json({ products: [{ id: 'rev-probe', name: '版本測試', barcode: 'R1' }] })),
+  env
+});
+response = await api.onRequestGet({ request: request('/api/meta'), env });
+const meta2 = await response.json();
+check('寫入商品後 revision 會變', meta2.productsRevision !== beforeRev, `${beforeRev} → ${meta2.productsRevision}`);
+
 /* 8. health */
 response = await api.onRequestGet({ request: request('/api/health'), env });
 const health = await response.json();
-check('health 回報 D1/R2 狀態', health.ok === true && health.r2 === true, JSON.stringify(health));
+check('health 回報 D1/R2 狀態（且附 revision）', health.ok === true && health.r2 === true && Boolean(health.productsRevision), JSON.stringify(health));
 
 /* 9. DELETE */
 console.log('\n=== 9. 刪除單一標籤 ===');

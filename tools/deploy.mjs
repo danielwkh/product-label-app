@@ -410,17 +410,19 @@ async function cmdVerify() {
 
   const waitSeconds = Number(flag('wait', 0)) || 0;
   if (waitSeconds) {
+    // 只輪詢靜態 HTML：這一步不會產生任何 D1 row read
     const deadline = Date.now() + waitSeconds * 1000;
     process.stdout.write('  等待新版本上線');
-    let live = null;
+    let ready = false;
     while (Date.now() < deadline) {
-      live = await readLive();
-      if (live.hasJobsUi) break;
+      const page = await fetchText('/');
+      if (/id="jobList"/.test(page.text)) { ready = true; break; }
       process.stdout.write('.');
-      await new Promise(r => setTimeout(r, 8000));
+      await new Promise(r => setTimeout(r, 5000));
     }
     console.log('');
-    if (!live || !live.hasJobsUi) warn(`等了 ${waitSeconds} 秒仍未偵測到新版本`);
+    if (!ready) warn(`等了 ${waitSeconds} 秒仍未偵測到新版本`);
+    else ok('新版本已上線');
   }
 
   title('1. 前端版本');
@@ -470,7 +472,7 @@ async function cmdVerify() {
   if (healthJson && healthJson.ok) ok(`/api/health 正常：products ${healthJson.products} / labels ${healthJson.labels} / r2 ${healthJson.r2}`);
   else bad(`/api/health 異常：${health.text.slice(0, 120)}`);
 
-  title('3. 資料沒有變少');
+  title('3. 資料沒有變少（只查一次，避免消耗 D1 row read）');
   const live = await readLive();
   if (live.products == null) {
     bad('bootstrap 無法解析，無法比對資料筆數');

@@ -56,6 +56,31 @@ const D1_BATCH_SIZE = 50;
 
 let schemaReady = false;
 
+async function ensureMetaTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT
+  )`).run();
+}
+
+/** 讀取少數幾筆 meta 資料（每次只讀 1~3 列，避免全表掃描） */
+async function readMeta(env, keys) {
+  const placeholders = keys.map(() => '?').join(',');
+  const rows = await env.DB.prepare(`SELECT key, value FROM meta WHERE key IN (${placeholders})`).bind(...keys).all();
+  const out = {};
+  for (const row of rows.results || []) out[row.key] = row.value;
+  return out;
+}
+
+/** 內容變動時把 revision 往上加，前端就能用「4 列讀取」判斷是否需要重抓 */
+async function bumpRevision(env, key) {
+  const timestamp = now();
+  await env.DB.prepare(`INSERT INTO meta (key, value, updated_at) VALUES (?, '1', ?)
+    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at`)
+    .bind(key, timestamp).run();
+}
+
 /**
  * 只做「新增欄位 / 新增索引」的自動遷移，不會刪除或改寫任何既有資料。
  * 這樣就算忘記先跑 migrations，部署後第一次請求也會自動補上欄位。
@@ -73,6 +98,7 @@ async function ensureSchema(env) {
     }
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_content_hash ON labels(content_hash)').run();
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_uploaded ON labels(uploaded_at)').run();
+    await ensureMetaTable(env);
     schemaReady = true;
   } catch (err) {
     console.warn('ensureSchema failed', err && err.message);
@@ -81,17 +107,19 @@ async function ensureSchema(env) {
 
 /* --------------------------------------------------------------- GET */
 
-export async function onRequestGet({ request, env }) {
+export async function onRequestGet({ request, env, context }) {
   const url = new URL(request.url);
 
   if (url.pathname.endsWith('/api/health')) {
+    // 注意：這裡刻意不用 COUNT(*)（會全表掃描，22,481 列的商品表每次要燒 22,481 次 row read）。
+    // 只讀 revision 這種單列資料，成本固定。
     const out = { ok: true, d1: Boolean(env.DB), r2: Boolean(env.LABELS), time: now() };
     if (env.DB) {
       try {
-        const row = await env.DB.prepare('SELECT COUNT(*) AS products FROM products').first();
-        const labels = await env.DB.prepare('SELECT COUNT(*) AS labels FROM labels').first();
-        out.products = row ? row.products : 0;
-        out.labels = labels ? labels.labels : 0;
+        await ensureSchema(env);
+        const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+        out.productsRevision = meta.products_revision || '0';
+        out.labelsRevision = meta.labels_revision || '0';
       } catch (err) {
         out.ok = false;
         out.error = String(err.message || err);
@@ -102,8 +130,60 @@ export async function onRequestGet({ request, env }) {
 
   if (!env.DB) return json({ error: 'D1 binding DB is not configured' }, 503);
 
+  /* 便宜版本檢查：只回 revision，前端據此決定是否要抓全量 bootstrap */
+  if (url.pathname.endsWith('/api/meta')) {
+    await ensureSchema(env);
+    const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+    return new Response(JSON.stringify({
+      cloud: true,
+      productsRevision: meta.products_revision || '0',
+      labelsRevision: meta.labels_revision || '0',
+      revision: `${meta.products_revision || '0'}.${meta.labels_revision || '0'}`
+    }), {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-d1-rows-read': '2'
+      }
+    });
+  }
+
+  /* 只取標籤清單（通常只有幾十~幾百列，比整包商品便宜很多） */
+  if (url.pathname.endsWith('/api/labels')) {
+    const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
+        matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
+        match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
+        content_hash AS hash, size, uploaded_at AS uploadedAt, updated_at AS updatedAt
+      FROM labels ORDER BY uploaded_at`).all();
+    return json({ labels: labels.results || [], cloud: true });
+  }
+
   if (url.pathname.endsWith('/api/bootstrap')) {
     await ensureSchema(env);
+
+    // 以 revision 當 ETag / 邊緣快取 key：
+    //   同一個 revision 只會真的查一次 D1，其他請求由 Cloudflare 邊緣直接回應
+    const requestedRevision = url.searchParams.get('rev');
+    const ifNoneMatch = request.headers.get('if-none-match');
+    let revision = requestedRevision;
+    if (!revision) {
+      const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+      revision = `${meta.products_revision || '0'}.${meta.labels_revision || '0'}`;
+    }
+    const etag = `W/"bootstrap-${revision}"`;
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new Response(null, { status: 304, headers: { etag, 'cache-control': 'public, max-age=60' } });
+    }
+
+    const edgeCache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+    const cacheKey = edgeCache ? new Request(`${url.origin}/api/bootstrap?rev=${encodeURIComponent(revision)}`, { method: 'GET' }) : null;
+    if (edgeCache && cacheKey) {
+      try {
+        const hit = await edgeCache.match(cacheKey);
+        if (hit) return hit;
+      } catch { /* 快取不可用就照常查詢 */ }
+    }
+
     const products = await env.DB.prepare(
       'SELECT id, name, barcode, barcode2, label_id AS labelId, updated_at AS updatedAt FROM products ORDER BY id'
     ).all();
@@ -112,12 +192,27 @@ export async function onRequestGet({ request, env }) {
         match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
         content_hash AS hash, size, uploaded_at AS uploadedAt, updated_at AS updatedAt
       FROM labels ORDER BY uploaded_at`).all();
-    return json({
+    const payload = {
       products: products.results || [],
       labels: labels.results || [],
       cloud: true,
-      version: 2
+      version: 2,
+      revision
+    };
+    const response = new Response(JSON.stringify(payload), {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'public, max-age=60',
+        'x-data-revision': revision,
+        etag
+      }
     });
+    if (edgeCache && cacheKey) {
+      try {
+        context.waitUntil(edgeCache.put(cacheKey, response.clone()));
+      } catch { /* ignore */ }
+    }
+    return response;
   }
 
   if (url.pathname.includes('/api/labels/') && url.pathname.endsWith('/file')) {
@@ -181,6 +276,7 @@ export async function onRequestPost({ request, env }) {
       await env.DB.prepare('DELETE FROM products').run();
     }
 
+    await ensureSchema(env);
     for (const group of chunk(rows, D1_BATCH_SIZE)) {
       const statements = group.map(p => env.DB.prepare(`INSERT INTO products (id, name, barcode, barcode2, label_id, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -192,6 +288,7 @@ export async function onRequestPost({ request, env }) {
       await env.DB.batch(statements);
       written += statements.length;
     }
+    if (written || replace) await bumpRevision(env, 'products_revision');
     return json({ ok: true, count: written, mode: replace ? 'replace' : 'merge' });
   }
 
@@ -242,6 +339,8 @@ export async function onRequestPost({ request, env }) {
       if (statements.length) await env.DB.batch(statements);
     }
 
+    if (written) await bumpRevision(env, 'labels_revision');
+    if (linked.length || unlinked.length) await bumpRevision(env, 'products_revision');
     return json({ ok: true, count: written });
   }
 
@@ -304,6 +403,7 @@ export async function onRequestPost({ request, env }) {
       timestamp
     ).run();
 
+    await bumpRevision(env, 'labels_revision');
     const productId = form.get('productId');
     if (productId) {
       await env.DB.prepare('UPDATE products SET label_id = ?, updated_at = ? WHERE id = ?')
@@ -343,6 +443,8 @@ export async function onRequestPatch({ request, env }) {
   ).run();
 
   await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id = ?').bind(timestamp, id).run();
+  await bumpRevision(env, 'labels_revision');
+  await bumpRevision(env, 'products_revision');
   if (body.productId != null) {
     await env.DB.prepare('UPDATE products SET label_id = ?, updated_at = ? WHERE id = ?')
       .bind(id, timestamp, Number(body.productId)).run();
@@ -363,5 +465,7 @@ export async function onRequestDelete({ request, env }) {
   if (env.LABELS && row && row.r2_key) await env.LABELS.delete(row.r2_key);
   await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id = ?').bind(now(), id).run();
   await env.DB.prepare('DELETE FROM labels WHERE id = ?').bind(id).run();
+  await bumpRevision(env, 'labels_revision');
+  await bumpRevision(env, 'products_revision');
   return json({ ok: true, id });
 }
