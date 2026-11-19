@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0f766e" />
+  <title>商品標籤助手 · Label Finder</title>
+  <link rel="manifest" href="manifest.json" />
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root {
+      --primary: #0f766e;
+      --primary-dark: #0d5c56;
+      --bg: #f0fdfa;
+      --card: #ffffff;
+      --text: #134e4a;
+      --danger: #dc2626;
+      --border: #99f6e4;
+      --radius: 14px;
+      --shadow: 0 4px 20px rgba(15, 118, 110, 0.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+      padding-bottom: 90px;
+      line-height: 1.5;
+    }
+    header {
+      background: linear-gradient(135deg, var(--primary), #0d9488);
+      color: white;
+      padding: 14px 18px 16px;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      box-shadow: var(--shadow);
+    }
+    header h1 { font-size: 1.2rem; font-weight: 700; }
+    header p { font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
+    .tabs {
+      display: flex;
+      background: white;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 68px;
+      z-index: 40;
+    }
+    .tab {
+      flex: 1;
+      text-align: center;
+      padding: 12px 4px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #64748b;
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      cursor: pointer;
+    }
+    .tab.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+      background: #f0fdfa;
+    }
+    .panel { display: none; padding: 14px; max-width: 640px; margin: 0 auto; }
+    .panel.active { display: block; }
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
+    }
+    .card h2 {
+      font-size: 1rem;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    label.file-btn, .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 12px 14px;
+      border-radius: 11px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      cursor: pointer;
+      border: none;
+      transition: all 0.15s;
+    }
+    label.file-btn, .btn-primary {
+      background: var(--primary);
+      color: white;
+      width: 100%;
+    }
+    label.file-btn:active, .btn-primary:active { background: var(--primary-dark); }
+    input[type="file"] { display: none; }
+    .btn-outline {
+      background: white;
+      color: var(--primary);
+      border: 2px solid var(--primary);
+    }
+    .btn-sm {
+      padding: 8px 12px;
+      font-size: 0.82rem;
+      border-radius: 8px;
+    }
+    .btn-danger {
+      background: #fef2f2;
+      color: var(--danger);
+      border: 1px solid #fecaca;
+    }
+    .status {
+      margin-top: 10px;
+      font-size: 0.84rem;
+      padding: 9px 11px;
+      border-radius: 9px;
+      background: #ecfdf5;
+      color: #065f46;
+      display: none;
+    }
+    .status.show { display: block; }
+    .status.error { background: #fee2e2; color: #991b1b; }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .stat {
+      background: #f0fdfa;
+      border-radius: 10px;
+      padding: 10px 6px;
+      text-align: center;
+    }
+    .stat .num { font-size: 1.35rem; font-weight: 700; color: var(--primary); }
+    .stat .label { font-size: 0.7rem; color: #64748b; margin-top: 1px; }
+    .search-box { display: flex; gap: 8px; margin-bottom: 12px; }
+    .search-box input {
+      flex: 1;
+      padding: 12px 14px;
+      border: 2px solid var(--border);
+      border-radius: 11px;
+      font-size: 1rem;
+      outline: none;
+      background: white;
+    }
+    .search-box input:focus { border-color: var(--primary); }
+    .btn-scan {
+      background: #0d9488;
+      color: white;
+      width: 100%;
+      margin-bottom: 10px;
+    }
+    #reader {
+      width: 100%;
+      max-width: 400px;
+      margin: 0 auto 14px;
+      border-radius: 12px;
+      overflow: hidden;
+      display: none;
+    }
+    #reader.show { display: block; }
+    .result-card, .label-item {
+      background: white;
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 10px;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+    .result-card .name, .label-item .fname {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+    .result-card .meta, .label-item .meta {
+      font-size: 0.82rem;
+      color: #64748b;
+      margin-bottom: 10px;
+    }
+    .result-card .meta span, .label-item .meta span {
+      display: inline-block;
+      background: #f0fdfa;
+      padding: 2px 7px;
+      border-radius: 6px;
+      margin: 2px 4px 2px 0;
+    }
+    .tag-ok { background: #d1fae5 !important; color: #065f46 !important; }
+    .tag-no { background: #fee2e2 !important; color: #991b1b !important; }
+    .result-actions, .label-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .result-actions .btn, .label-actions .btn { flex: 1; min-width: 110px; }
+    .empty {
+      text-align: center;
+      padding: 36px 16px;
+      color: #94a3b8;
+    }
+    .empty .icon { font-size: 2.6rem; margin-bottom: 10px; }
+    .footer-note {
+      text-align: center;
+      font-size: 0.72rem;
+      color: #94a3b8;
+      padding: 16px;
+    }
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(120px);
+      background: #134e4a;
+      color: white;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      z-index: 200;
+      transition: transform 0.3s ease;
+      max-width: 90%;
+      text-align: center;
+    }
+    #toast.show { transform: translateX(-50%) translateY(0); }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: 150;
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      background: white;
+      width: 100%;
+      max-width: 500px;
+      max-height: 85dvh;
+      border-radius: 18px 18px 0 0;
+      padding: 18px;
+      overflow-y: auto;
+      animation: slideUp 0.25s ease;
+    }
+    @keyframes slideUp {
+      from { transform: translateY(40px); opacity: 0.6; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .modal h3 { font-size: 1.1rem; margin-bottom: 6px; }
+    .modal .sub { font-size: 0.85rem; color: #64748b; margin-bottom: 14px; }
+    .modal-search { margin-bottom: 12px; }
+    .modal-search input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      font-size: 1rem;
+      outline: none;
+    }
+    .modal-search input:focus { border-color: var(--primary); }
+    .product-pick {
+      padding: 12px;
+      border-bottom: 1px solid #e2e8f0;
+      cursor: pointer;
+    }
+    .product-pick:active { background: #f0fdfa; }
+    .product-pick .pn { font-weight: 600; }
+    .product-pick .pb { font-size: 0.8rem; color: #64748b; margin-top: 2px; }
+    .modal-close {
+      margin-top: 12px;
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: none;
+      background: #f1f5f9;
+      font-weight: 600;
+      color: #475569;
+    }
+    .filter-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .filter-btn {
+      flex: 1;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: white;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #64748b;
+      cursor: pointer;
+    }
+    .filter-btn.active {
+      background: var(--primary);
+      color: white;
+      border-color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🏷️ 商品標籤助手</h1>
+    <p>上傳 → 配對 → 掃碼 → 分享到 WePrint</p>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="upload">上傳</button>
+    <button class="tab" data-tab="match">配對管理</button>
+    <button class="tab" data-tab="search">搜尋/掃碼</button>
+  </div>
+
+  <!-- Upload Panel -->
+  <div id="panel-upload" class="panel active">
+    <div class="card">
+      <h2>📊 商品資料庫 (Excel)</h2>
+      <p style="font-size:0.82rem;color:#64748b;margin-bottom:10px;">需包含「名稱」、「條碼」、「第二條碼」</p>
+      <label class="file-btn">選擇 Excel 檔案
+        <input type="file" id="excelInput" accept=".xlsx,.xls,.csv" />
+      </label>
+      <div id="excelStatus" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>📄 營養標籤 PDF</h2>
+      <p style="font-size:0.82rem;color:#64748b;margin-bottom:10px;">一次可選多個，檔名含商品名稱會自動模糊比對</p>
+      <label class="file-btn">選擇多個 PDF
+        <input type="file" id="pdfInput" accept=".pdf" multiple />
+      </label>
+      <div id="pdfStatus" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>📈 目前資料</h2>
+      <div class="stats">
+        <div class="stat"><div class="num" id="statProducts">0</div><div class="label">商品</div></div>
+        <div class="stat"><div class="num" id="statLabels">0</div><div class="label">標籤</div></div>
+        <div class="stat"><div class="num" id="statMatched">0</div><div class="label">已配對</div></div>
+      </div>
+      <button class="btn btn-danger" style="width:100%;margin-top:12px;" id="clearDataBtn">清除所有本地資料</button>
+    </div>
+  </div>
+
+  <!-- Match Management Panel -->
+  <div id="panel-match" class="panel">
+    <div class="card">
+      <h2>🔗 標籤配對管理</h2>
+      <p style="font-size:0.82rem;color:#64748b;margin-bottom:10px;">自動配對失敗的可以用「手動配對」連結商品</p>
+      <div class="filter-row">
+        <button class="filter-btn active" data-filter="all">全部</button>
+        <button class="filter-btn" data-filter="unmatched">未配對</button>
+        <button class="filter-btn" data-filter="matched">已配對</button>
+      </div>
+      <div id="matchList"></div>
+    </div>
+  </div>
+
+  <!-- Search Panel -->
+  <div id="panel-search" class="panel">
+    <div class="card">
+      <h2>🔍 搜尋商品</h2>
+      <button class="btn btn-scan" id="scanBtn">📷 開啟相機掃描條碼</button>
+      <div id="reader"></div>
+      <div class="search-box">
+        <input type="text" id="barcodeInput" placeholder="輸入條碼或商品名稱..." inputmode="search" />
+        <button class="btn btn-primary" style="width:auto;padding:12px 16px;" id="searchBtn">搜尋</button>
+      </div>
+      <div id="searchResults"></div>
+    </div>
+  </div>
+
+  <div class="footer-note">資料只存在本機瀏覽器 · 可加入主畫面當成 App</div>
+  <div id="toast"></div>
+
+  <!-- Manual Match Modal -->
+  <div class="modal-overlay" id="matchModal">
+    <div class="modal">
+      <h3>手動配對</h3>
+      <div class="sub" id="modalLabelName">選擇要連結的商品</div>
+      <div class="modal-search">
+        <input type="text" id="modalSearchInput" placeholder="搜尋商品名稱或條碼..." />
+      </div>
+      <div id="modalProductList" style="max-height:40dvh;overflow-y:auto;"></div>
+      <button class="modal-close" id="modalCloseBtn">取消</button>
+    </div>
+  </div>
+
+  <!-- PDF Preview Modal -->
+  <div class="modal-overlay" id="previewModal">
+    <div class="modal" style="max-height:92dvh;padding:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <h3 style="font-size:1rem;margin:0;" id="previewTitle">標籤預覽</h3>
+        <button id="previewCloseBtn" style="background:#f1f5f9;border:none;border-radius:8px;padding:8px 14px;font-weight:600;color:#475569;">關閉</button>
+      </div>
+      <div id="previewContainer" style="width:100%;height:70dvh;background:#f8fafc;border-radius:10px;overflow:hidden;">
+        <iframe id="previewFrame" style="width:100%;height:100%;border:none;"></iframe>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-primary" style="flex:1;" id="previewShareBtn">📤 分享到 WePrint</button>
+        <button class="btn btn-outline" style="flex:1;" id="previewDownloadBtn">下載</button>
+      </div>
+    </div>
+  </div>
+
+
+  <script>
+    let products = [];
+    let labels = {};
+    let fuse = null;
+    let html5QrCode = null;
+    let isScanning = false;
+    let currentMatchLabelId = null;
+    let matchFilter = 'all';
+
+    const DB_NAME = 'ProductLabelDB';
+    const DB_VERSION = 1;
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('products')) db.createObjectStore('products', { keyPath: 'id', autoIncrement: true });
+          if (!db.objectStoreNames.contains('labels')) db.createObjectStore('labels', { keyPath: 'id' });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function saveProducts(list) {
+      const db = await openDB();
+      const tx = db.transaction('products', 'readwrite');
+      const store = tx.objectStore('products');
+      store.clear();
+      for (const p of list) store.put(p);
+      return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    }
+
+    async function loadProducts() {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const req = db.transaction('products', 'readonly').objectStore('products').getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function saveLabel(id, data) {
+      const db = await openDB();
+      const tx = db.transaction('labels', 'readwrite');
+      tx.objectStore('labels').put({ id, ...data });
+      return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    }
+
+    async function loadAllLabels() {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const req = db.transaction('labels', 'readonly').objectStore('labels').getAll();
+        req.onsuccess = () => {
+          const map = {};
+          (req.result || []).forEach(l => { map[l.id] = l; });
+          resolve(map);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function clearAllData() {
+      const db = await openDB();
+      const tx = db.transaction(['products', 'labels'], 'readwrite');
+      tx.objectStore('products').clear();
+      tx.objectStore('labels').clear();
+      return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    }
+
+    function toast(msg, duration = 2500) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), duration);
+    }
+
+    function showStatus(id, msg, type = '') {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.className = 'status show' + (type ? ' ' + type : '');
+    }
+
+    function cleanName(str) {
+      if (!str) return '';
+      return String(str).replace(/\.pdf$/i, '').replace(/[_\-\s]+/g, ' ').replace(/[（(].*?[）)]/g, '').trim().toLowerCase();
+    }
+
+    function updateStats() {
+      document.getElementById('statProducts').textContent = products.length;
+      const labelCount = Object.keys(labels).length;
+      document.getElementById('statLabels').textContent = labelCount;
+      const matched = products.filter(p => p.labelId && labels[p.labelId]).length;
+      document.getElementById('statMatched').textContent = matched;
+    }
+
+    function rebuildFuse() {
+      if (products.length === 0) { fuse = null; return; }
+      fuse = new Fuse(products, {
+        keys: [{ name: 'name', weight: 0.55 }, { name: 'barcode', weight: 0.3 }, { name: 'barcode2', weight: 0.3 }],
+        threshold: 0.42,
+        includeScore: true,
+        ignoreLocation: true
+      });
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ===== Excel =====
+    document.getElementById('excelInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      showStatus('excelStatus', '讀取中...');
+      try {
+        const data = await file.arrayBuffer();
+        const wb = XLSX.read(data, { type: 'array' });
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+        if (rows.length === 0) { showStatus('excelStatus', 'Excel 沒有資料', 'error'); return; }
+
+        const headers = Object.keys(rows[0]);
+        const findCol = (cands) => {
+          for (const c of cands) {
+            const f = headers.find(h => h.toLowerCase().includes(c.toLowerCase()) || c.toLowerCase().includes(h.toLowerCase()));
+            if (f) return f;
+          }
+          return null;
+        };
+        const nameCol = findCol(['名稱', '商品名稱', '品名', 'name', 'product']);
+        const barcodeCol = findCol(['條碼', 'barcode', 'bar code', '主條碼']);
+        const barcode2Col = findCol(['第二條碼', '副條碼', 'barcode2', 'second', 'barcode 2']);
+
+        if (!nameCol) { showStatus('excelStatus', '找不到「名稱」欄位', 'error'); return; }
+
+        products = rows.map((row, idx) => ({
+          id: idx + 1,
+          name: String(row[nameCol] || '').trim(),
+          barcode: String(row[barcodeCol] || '').trim(),
+          barcode2: String(row[barcode2Col] || '').trim(),
+          labelId: null
+        })).filter(p => p.name);
+
+        rebuildFuse();
+        await rematchAllLabels();
+        await saveProducts(products);
+        updateStats();
+        renderMatchList();
+        showStatus('excelStatus', `成功載入 ${products.length} 個商品`);
+        toast('Excel 上傳成功');
+      } catch (err) {
+        console.error(err);
+        showStatus('excelStatus', '讀取失敗：' + err.message, 'error');
+      }
+      e.target.value = '';
+    });
+
+    // ===== PDF =====
+    document.getElementById('pdfInput').addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files);
+      if (!files.length) return;
+      showStatus('pdfStatus', `處理 ${files.length} 個 PDF...`);
+      let added = 0, matchedCount = 0;
+
+      for (const file of files) {
+        if (!file.name.toLowerCase().endsWith('.pdf')) continue;
+        const id = 'label_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+        const nameFromFile = file.name.replace(/\.pdf$/i, '');
+
+        let bestMatch = null, bestScore = 1;
+        if (fuse) {
+          const results = fuse.search(nameFromFile);
+          if (results.length && results[0].score < 0.48) {
+            bestMatch = results[0].item;
+            bestScore = results[0].score;
+          }
+        }
+        if (!bestMatch) {
+          const cleaned = cleanName(nameFromFile);
+          for (const p of products) {
+            const pc = cleanName(p.name);
+            if (pc && (cleaned.includes(pc) || pc.includes(cleaned) || cleaned.replace(/\s/g,'') === pc.replace(/\s/g,''))) {
+              bestMatch = p; bestScore = 0.15; break;
+            }
+          }
+        }
+
+        const labelData = {
+          filename: file.name,
+          nameFromFile,
+          blob: file,
+          matchedProductName: bestMatch ? bestMatch.name : null
+        };
+        labels[id] = labelData;
+        await saveLabel(id, labelData);
+
+        if (bestMatch) {
+          const prod = products.find(p => p.id === bestMatch.id);
+          if (prod) { prod.labelId = id; matchedCount++; }
+        }
+        added++;
+      }
+
+      await saveProducts(products);
+      updateStats();
+      renderMatchList();
+      showStatus('pdfStatus', `新增 ${added} 個 PDF，自動配對成功 ${matchedCount} 個。未配對的請到「配對管理」手動連結`);
+      toast(`已處理 ${added} 個標籤`);
+      e.target.value = '';
+    });
+
+    async function rematchAllLabels() {
+      // Clear existing links first
+      products.forEach(p => p.labelId = null);
+      for (const [id, label] of Object.entries(labels)) {
+        let bestMatch = null;
+        if (fuse) {
+          const results = fuse.search(label.nameFromFile || '');
+          if (results.length && results[0].score < 0.48) bestMatch = results[0].item;
+        }
+        if (!bestMatch) {
+          const cleaned = cleanName(label.nameFromFile);
+          for (const p of products) {
+            const pc = cleanName(p.name);
+            if (pc && (cleaned.includes(pc) || pc.includes(cleaned))) { bestMatch = p; break; }
+          }
+        }
+        if (bestMatch) {
+          const prod = products.find(p => p.id === bestMatch.id);
+          if (prod && !prod.labelId) {
+            prod.labelId = id;
+            label.matchedProductName = bestMatch.name;
+            await saveLabel(id, { ...label, matchedProductName: bestMatch.name });
+          }
+        }
+      }
+    }
+
+    // ===== Match List =====
+    function renderMatchList() {
+      const el = document.getElementById('matchList');
+      const ids = Object.keys(labels);
+      if (ids.length === 0) {
+        el.innerHTML = '<div class="empty"><div class="icon">📄</div>尚未上傳任何 PDF</div>';
+        return;
+      }
+
+      let list = ids.map(id => ({ id, ...labels[id] }));
+      if (matchFilter === 'unmatched') list = list.filter(l => !l.matchedProductName);
+      if (matchFilter === 'matched') list = list.filter(l => l.matchedProductName);
+
+      if (list.length === 0) {
+        el.innerHTML = '<div class="empty"><div class="icon">✅</div>沒有符合條件的項目</div>';
+        return;
+      }
+
+      el.innerHTML = list.map(l => {
+        const linked = l.matchedProductName;
+        return `
+          <div class="label-item">
+            <div class="fname">${escapeHtml(l.nameFromFile || l.filename)}</div>
+            <div class="meta">
+              ${linked
+                ? `<span class="tag-ok">已配對：${escapeHtml(linked)}</span>`
+                : `<span class="tag-no">未配對</span>`}
+            </div>
+            <div class="label-actions">
+              ${linked
+                ? `<button class="btn btn-outline btn-sm" onclick="unlinkLabel('${l.id}')">解除配對</button>
+                   <button class="btn btn-primary btn-sm" onclick="openMatchModal('${l.id}')">重新配對</button>`
+                : `<button class="btn btn-primary btn-sm" onclick="openMatchModal('${l.id}')">手動配對</button>`
+              }
+              <button class="btn btn-outline btn-sm" onclick="previewLabel('${l.id}')">預覽</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        matchFilter = btn.dataset.filter;
+        renderMatchList();
+      });
+    });
+
+    // ===== Manual Match Modal =====
+    window.openMatchModal = function(labelId) {
+      currentMatchLabelId = labelId;
+      const label = labels[labelId];
+      document.getElementById('modalLabelName').textContent = '為「' + (label.nameFromFile || label.filename) + '」選擇商品';
+      document.getElementById('modalSearchInput').value = '';
+      renderModalProducts('');
+      document.getElementById('matchModal').classList.add('show');
+      setTimeout(() => document.getElementById('modalSearchInput').focus(), 200);
+    };
+
+    function renderModalProducts(query) {
+      const el = document.getElementById('modalProductList');
+      let list = products;
+      if (query.trim()) {
+        if (fuse) {
+          list = fuse.search(query.trim()).filter(r => r.score < 0.55).map(r => r.item);
+        } else {
+          const q = query.toLowerCase();
+          list = products.filter(p =>
+            p.name.toLowerCase().includes(q) ||
+            (p.barcode && p.barcode.includes(q)) ||
+            (p.barcode2 && p.barcode2.includes(q))
+          );
+        }
+      }
+      if (list.length === 0) {
+        el.innerHTML = '<div style="padding:20px;text-align:center;color:#94a3b8;">找不到商品</div>';
+        return;
+      }
+      el.innerHTML = list.slice(0, 30).map(p => `
+        <div class="product-pick" onclick="confirmMatch(${p.id})">
+          <div class="pn">${escapeHtml(p.name)}</div>
+          <div class="pb">${p.barcode ? '條碼：' + escapeHtml(p.barcode) : ''}${p.barcode2 ? ' / ' + escapeHtml(p.barcode2) : ''}</div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('modalSearchInput').addEventListener('input', (e) => {
+      renderModalProducts(e.target.value);
+    });
+
+    window.confirmMatch = async function(productId) {
+      if (!currentMatchLabelId) return;
+      const label = labels[currentMatchLabelId];
+      const prod = products.find(p => p.id === productId);
+      if (!prod || !label) return;
+
+      // Unlink previous if any
+      if (prod.labelId && prod.labelId !== currentMatchLabelId) {
+        const oldLabel = labels[prod.labelId];
+        if (oldLabel) {
+          oldLabel.matchedProductName = null;
+          await saveLabel(prod.labelId, oldLabel);
+        }
+      }
+      // Unlink this label from previous product
+      products.forEach(p => {
+        if (p.labelId === currentMatchLabelId) p.labelId = null;
+      });
+
+      prod.labelId = currentMatchLabelId;
+      label.matchedProductName = prod.name;
+      await saveLabel(currentMatchLabelId, label);
+      await saveProducts(products);
+
+      updateStats();
+      renderMatchList();
+      document.getElementById('matchModal').classList.remove('show');
+      toast('已配對：' + prod.name);
+      currentMatchLabelId = null;
+    };
+
+    window.unlinkLabel = async function(labelId) {
+      const label = labels[labelId];
+      if (!label) return;
+      products.forEach(p => { if (p.labelId === labelId) p.labelId = null; });
+      label.matchedProductName = null;
+      await saveLabel(labelId, label);
+      await saveProducts(products);
+      updateStats();
+      renderMatchList();
+      toast('已解除配對');
+    };
+
+    document.getElementById('modalCloseBtn').addEventListener('click', () => {
+      document.getElementById('matchModal').classList.remove('show');
+      currentMatchLabelId = null;
+    });
+    document.getElementById('matchModal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('matchModal')) {
+        document.getElementById('matchModal').classList.remove('show');
+        currentMatchLabelId = null;
+      }
+    });
+
+    // ===== Search =====
+    function doSearch(query) {
+      const q = (query || '').trim();
+      const resultsEl = document.getElementById('searchResults');
+      if (!q) {
+        resultsEl.innerHTML = '<div class="empty"><div class="icon">🔎</div>請輸入條碼或商品名稱</div>';
+        return;
+      }
+      if (products.length === 0) {
+        resultsEl.innerHTML = '<div class="empty"><div class="icon">📭</div>請先上傳 Excel</div>';
+        return;
+      }
+
+      let results = products.filter(p =>
+        p.barcode === q || p.barcode2 === q ||
+        (p.barcode && p.barcode.includes(q)) ||
+        (p.barcode2 && p.barcode2.includes(q))
+      );
+      if (results.length === 0 && fuse) {
+        results = fuse.search(q).filter(r => r.score < 0.5).slice(0, 10).map(r => r.item);
+      }
+
+      if (results.length === 0) {
+        resultsEl.innerHTML = '<div class="empty"><div class="icon">😕</div>找不到符合的商品</div>';
+        return;
+      }
+
+      resultsEl.innerHTML = results.map(p => {
+        const hasLabel = p.labelId && labels[p.labelId];
+        return `
+          <div class="result-card">
+            <div class="name">${escapeHtml(p.name)}</div>
+            <div class="meta">
+              ${p.barcode ? `<span>條碼：${escapeHtml(p.barcode)}</span>` : ''}
+              ${p.barcode2 ? `<span>第二條碼：${escapeHtml(p.barcode2)}</span>` : ''}
+              ${hasLabel ? `<span class="tag-ok">已有標籤</span>` : `<span class="tag-no">未配對標籤</span>`}
+            </div>
+            <div class="result-actions">
+              ${hasLabel
+                ? `<button class="btn btn-primary" onclick="shareLabel('${p.labelId}')">📤 分享到 WePrint</button>
+                   <button class="btn btn-outline" onclick="previewLabel('${p.labelId}')">👁 預覽</button>`
+                : `<button class="btn btn-outline" disabled style="opacity:0.55">尚無標籤</button>`
+              }
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    document.getElementById('searchBtn').addEventListener('click', () => doSearch(document.getElementById('barcodeInput').value));
+    document.getElementById('barcodeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(e.target.value); });
+
+    // ===== Share / Preview =====
+    window.shareLabel = async function(labelId) {
+      const label = labels[labelId];
+      if (!label || !label.blob) { toast('找不到標籤檔案'); return; }
+      const file = new File([label.blob], label.filename, { type: 'application/pdf' });
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: label.nameFromFile, text: '營養標籤' });
+          toast('已開啟分享選單');
+        } catch (err) {
+          if (err.name !== 'AbortError') fallbackDownload(file);
+        }
+      } else {
+        fallbackDownload(file);
+      }
+    };
+
+    function fallbackDownload(file) {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url; a.download = file.name; a.click();
+      URL.revokeObjectURL(url);
+      toast('已下載，請手動分享到 WePrint');
+    }
+
+    let currentPreviewUrl = null;
+    let currentPreviewLabelId = null;
+
+    window.previewLabel = function(labelId) {
+      const label = labels[labelId];
+      if (!label) {
+        toast('找不到標籤資料');
+        return;
+      }
+      if (!label.blob) {
+        toast('標籤檔案遺失，請重新上傳此 PDF');
+        return;
+      }
+
+      // Revoke previous URL if any
+      if (currentPreviewUrl) {
+        try { URL.revokeObjectURL(currentPreviewUrl); } catch(e) {}
+      }
+
+      currentPreviewLabelId = labelId;
+      currentPreviewUrl = URL.createObjectURL(label.blob);
+
+      document.getElementById('previewTitle').textContent = label.nameFromFile || label.filename || '標籤預覽';
+      const frame = document.getElementById('previewFrame');
+      frame.src = currentPreviewUrl;
+
+      document.getElementById('previewModal').classList.add('show');
+    };
+
+    function closePreviewModal() {
+      document.getElementById('previewModal').classList.remove('show');
+      const frame = document.getElementById('previewFrame');
+      frame.src = '';
+      if (currentPreviewUrl) {
+        try { URL.revokeObjectURL(currentPreviewUrl); } catch(e) {}
+        currentPreviewUrl = null;
+      }
+      currentPreviewLabelId = null;
+    }
+
+    document.getElementById('previewCloseBtn').addEventListener('click', closePreviewModal);
+    document.getElementById('previewModal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('previewModal')) closePreviewModal();
+    });
+
+    document.getElementById('previewShareBtn').addEventListener('click', () => {
+      if (currentPreviewLabelId) {
+        closePreviewModal();
+        shareLabel(currentPreviewLabelId);
+      }
+    });
+
+    document.getElementById('previewDownloadBtn').addEventListener('click', () => {
+      if (!currentPreviewLabelId) return;
+      const label = labels[currentPreviewLabelId];
+      if (!label || !label.blob) return;
+      const file = new File([label.blob], label.filename || 'label.pdf', { type: 'application/pdf' });
+      fallbackDownload(file);
+    });
+
+
+    // ===== Scanner =====
+    document.getElementById('scanBtn').addEventListener('click', async () => {
+      if (isScanning) { await stopScanner(); return; }
+      document.getElementById('reader').classList.add('show');
+      document.getElementById('scanBtn').textContent = '⏹ 停止掃描';
+      isScanning = true;
+      html5QrCode = new Html5Qrcode('reader');
+      try {
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 250, height: 120 }, aspectRatio: 1.5 },
+          (decodedText) => {
+            document.getElementById('barcodeInput').value = decodedText;
+            doSearch(decodedText);
+            stopScanner();
+            toast('掃描成功');
+          },
+          () => {}
+        );
+      } catch (err) {
+        toast('無法開啟相機：' + (err.message || '請確認權限'));
+        stopScanner();
+      }
+    });
+
+    async function stopScanner() {
+      if (html5QrCode && isScanning) {
+        try { await html5QrCode.stop(); html5QrCode.clear(); } catch (e) {}
+      }
+      isScanning = false;
+      document.getElementById('reader').classList.remove('show');
+      document.getElementById('scanBtn').textContent = '📷 開啟相機掃描條碼';
+    }
+
+    // ===== Tabs =====
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'match') renderMatchList();
+        if (tab.dataset.tab !== 'search') stopScanner();
+      });
+    });
+
+    // ===== Clear =====
+    document.getElementById('clearDataBtn').addEventListener('click', async () => {
+      if (!confirm('確定清除所有本地資料？此操作無法復原。')) return;
+      await clearAllData();
+      products = []; labels = {}; fuse = null;
+      updateStats();
+      renderMatchList();
+      document.getElementById('excelStatus').classList.remove('show');
+      document.getElementById('pdfStatus').classList.remove('show');
+      document.getElementById('searchResults').innerHTML = '';
+      toast('已清除所有資料');
+    });
+
+    // ===== Init =====
+    (async function init() {
+      try {
+        products = await loadProducts();
+        labels = await loadAllLabels();
+        products.forEach(p => { if (p.labelId && !labels[p.labelId]) p.labelId = null; });
+        for (const [id, label] of Object.entries(labels)) {
+          if (label.matchedProductName) {
+            const p = products.find(pr => pr.name === label.matchedProductName);
+            if (p) p.labelId = id;
+          }
+        }
+        rebuildFuse();
+        updateStats();
+        renderMatchList();
+      } catch (err) { console.error('Init error', err); }
+    })();
+  </script>
+</body>
+</html>
