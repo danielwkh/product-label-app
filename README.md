@@ -27,11 +27,16 @@
 - html5-qrcode 條碼掃描
 - IndexedDB 本地儲存
 - Web Share API 分享檔案
+- PDF.js、SheetJS、Fuse.js、html5-qrcode 皆存放於 `vendor/`，PDF 預覽不依賴 CDN
+- `sw.js` 會快取 App shell，完成首次線上載入後可離線啟動與預覽 PDF
 
-## 部署到 GitHub Pages
+## 部署到 Cloudflare Pages / GitHub Pages
 
-1. 到 Settings → Pages → Source 選 main branch / root
-2. 之後就能用 `https://danielwkh.github.io/product-label-app/` 開啟
+將整個 repository 根目錄作為靜態網站根目錄，不需要 build command，也不需要後端。
+
+部署後第一次請在網路正常時開啟網站，等待 Service Worker 安裝完成，再重新整理一次。之後 App shell、PDF.js 與其他前端相依檔會由 Service Worker 快取，離線時仍可開啟 App 和預覽已儲存在 IndexedDB 的 PDF。
+
+相機功能及 Service Worker 都需要 HTTPS；Cloudflare Pages 和 GitHub Pages 均符合此條件。瀏覽器的 IndexedDB 和 Service Worker 是以網域為單位保存，換網域後需要重新上傳資料。
 
 ## 注意
 
