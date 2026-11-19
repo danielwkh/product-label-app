@@ -55,6 +55,7 @@ function chunk(array, size) {
 const D1_BATCH_SIZE = 50;
 
 let schemaReady = false;
+let schemaError = null;
 
 async function ensureMetaTable(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (
@@ -100,8 +101,10 @@ async function ensureSchema(env) {
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_uploaded ON labels(uploaded_at)').run();
     await ensureMetaTable(env);
     schemaReady = true;
+    schemaError = null;
   } catch (err) {
-    console.warn('ensureSchema failed', err && err.message);
+    schemaError = String((err && err.message) || err);
+    console.warn('ensureSchema failed', schemaError);
   }
 }
 
@@ -117,12 +120,16 @@ export async function onRequestGet({ request, env, context }) {
     if (env.DB) {
       try {
         await ensureSchema(env);
+        await ensureSchema(env);
         const meta = await readMeta(env, ['products_revision', 'labels_revision']);
         out.productsRevision = meta.products_revision || '0';
         out.labelsRevision = meta.labels_revision || '0';
+        out.metaTable = Boolean(meta.products_revision);
       } catch (err) {
-        out.ok = false;
-        out.error = String(err.message || err);
+        // 讀不到版本號不算服務中斷：bootstrap 仍可運作（只是每次都要全量讀取）
+        out.metaTable = false;
+        out.schemaError = schemaError || String((err && err.message) || err);
+        console.warn('health: readMeta failed', out.schemaError);
       }
     }
     return json(out, out.ok ? 200 : 500);
@@ -133,12 +140,21 @@ export async function onRequestGet({ request, env, context }) {
   /* 便宜版本檢查：只回 revision，前端據此決定是否要抓全量 bootstrap */
   if (url.pathname.endsWith('/api/meta')) {
     await ensureSchema(env);
-    const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+    let meta = null;
+    let degraded = false;
+    try {
+      meta = await readMeta(env, ['products_revision', 'labels_revision']);
+    } catch (err) {
+      degraded = true;
+      schemaError = String((err && err.message) || err);
+    }
     return new Response(JSON.stringify({
       cloud: true,
-      productsRevision: meta.products_revision || '0',
-      labelsRevision: meta.labels_revision || '0',
-      revision: `${meta.products_revision || '0'}.${meta.labels_revision || '0'}`
+      degraded,
+      schemaError: degraded ? schemaError : undefined,
+      productsRevision: meta ? (meta.products_revision || '0') : null,
+      labelsRevision: meta ? (meta.labels_revision || '0') : null,
+      revision: meta ? `${meta.products_revision || '0'}.${meta.labels_revision || '0'}` : null
     }), {
       headers: {
         'content-type': 'application/json; charset=utf-8',

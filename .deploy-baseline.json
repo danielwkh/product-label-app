@@ -1,19 +1,19 @@
 {
   "url": "https://product-label-app.pages.dev",
-  "checkedAt": "2026-11-19T19:49:46.701Z",
+  "checkedAt": "2026-11-19T20:05:23.586Z",
   "health": {
     "ok": false,
     "d1": true,
     "r2": true,
-    "time": "2026-11-19T19:49:46.172Z",
-    "error": "D1_ERROR: Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."
+    "time": "2026-11-19T20:05:21.040Z",
+    "error": "D1_ERROR: no such table: meta: SQLITE_ERROR"
   },
   "bootstrapVersion": null,
   "products": null,
   "labels": null,
   "healthStatus": 500,
-  "hasMetaRoute": false,
-  "healthError": "{\"ok\":false,\"d1\":true,\"r2\":true,\"time\":\"2026-11-19T19:49:46.172Z\",\"error\":\"D1_ERROR: Your account has exceeded D1's free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midni",
+  "hasMetaRoute": true,
+  "healthError": "{\"ok\":false,\"d1\":true,\"r2\":true,\"time\":\"2026-11-19T20:05:21.040Z\",\"error\":\"D1_ERROR: no such table: meta: SQLITE_ERROR\"}",
   "hasJobsUi": true,
   "serving": 200,
   "htmlBytes": 16929
