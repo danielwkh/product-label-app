@@ -57,6 +57,8 @@ const D1_BATCH_SIZE = 50;
 let schemaReady = false;
 let schemaError = null;
 
+const isQuotaError = message => /exceeded|free tier|row read|daily|1101|quota/i.test(String(message || ''));
+
 async function ensureMetaTable(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -76,10 +78,19 @@ async function readMeta(env, keys) {
 
 /** 內容變動時把 revision 往上加，前端就能用「4 列讀取」判斷是否需要重抓 */
 async function bumpRevision(env, key) {
-  const timestamp = now();
-  await env.DB.prepare(`INSERT INTO meta (key, value, updated_at) VALUES (?, '1', ?)
-    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at`)
-    .bind(key, timestamp).run();
+  // 版本號只是「省讀取」的優化：即使寫不進去，資料本身仍然正確，
+  // 不要因此讓商品/標籤的寫入失敗。
+  try {
+    const timestamp = now();
+    await env.DB.prepare(`INSERT INTO meta (key, value, updated_at) VALUES (?, '1', ?)
+      ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at`)
+      .bind(key, timestamp).run();
+    return true;
+  } catch (err) {
+    schemaError = String((err && err.message) || err);
+    console.warn('bumpRevision failed', key, schemaError);
+    return false;
+  }
 }
 
 /**
@@ -126,9 +137,15 @@ export async function onRequestGet({ request, env, context }) {
         out.labelsRevision = meta.labels_revision || '0';
         out.metaTable = Boolean(meta.products_revision);
       } catch (err) {
-        // 讀不到版本號不算服務中斷：bootstrap 仍可運作（只是每次都要全量讀取）
+        // 分兩種情況：
+        //   1) 只是 meta 表還沒建立（例如額度不足導致 DDL 失敗）→ 服務仍可用，bootstrap 照常
+        //   2) D1 完全讀不到（額度用完 / 逾時）→ 要誠實回報 ok:false，避免又被誤判成「沒啟用」
         out.metaTable = false;
         out.schemaError = schemaError || String((err && err.message) || err);
+        if (isQuotaError(out.schemaError)) {
+          out.ok = false;
+          out.error = out.schemaError;
+        }
         console.warn('health: readMeta failed', out.schemaError);
       }
     }
