@@ -1,0 +1,13 @@
+name = "product-label-app"
+compatibility_date = "2026-11-19"
+pages_build_output_dir = "."
+
+[[d1_databases]]
+binding = "DB"
+database_name = "product-label-app"
+database_id = "185ccca9-1fce-41db-9b26-3ed3acb4a1a2"
+
+# Enable R2 in the Cloudflare Dashboard, create this bucket, then keep this binding.
+[[r2_buckets]]
+binding = "LABELS"
+bucket_name = "product-label-app-labels"

@@ -29,6 +29,7 @@
 - Web Share API 分享檔案
 - PDF.js、SheetJS、Fuse.js、html5-qrcode 皆存放於 `vendor/`，PDF 預覽不依賴 CDN
 - `sw.js` 會快取 App shell，完成首次線上載入後可離線啟動與預覽 PDF
+- Cloudflare Pages Functions + D1/R2 共用資料 API：同事可使用相同商品、配對和 PDF
 
 ## 部署到 Cloudflare Pages / GitHub Pages
 
@@ -37,6 +38,19 @@
 部署後第一次請在網路正常時開啟網站，等待 Service Worker 安裝完成，再重新整理一次。之後 App shell、PDF.js 與其他前端相依檔會由 Service Worker 快取，離線時仍可開啟 App 和預覽已儲存在 IndexedDB 的 PDF。
 
 相機功能及 Service Worker 都需要 HTTPS；Cloudflare Pages 和 GitHub Pages 均符合此條件。瀏覽器的 IndexedDB 和 Service Worker 是以網域為單位保存，換網域後需要重新上傳資料。
+
+## Cloudflare 共用資料部署
+
+共用模式需要使用 Cloudflare Pages，而不是 GitHub Pages。專案已包含：
+
+- `schema.sql`：D1 的 `products` 和 `labels` 資料表
+- `functions/api/[[path]].js`：商品同步、標籤 metadata、配對更新及 R2 PDF API
+- `wrangler.toml`：D1 `product-label-app` 與 R2 `product-label-app-labels` 綁定範本
+- `_routes.json`：把 `/api/*` 路由到 Pages Functions
+
+部署前請在 Cloudflare Dashboard 啟用 R2，建立名為 `product-label-app-labels` 的 bucket，並把它綁定為 `LABELS`。D1 database ID 已放在 `wrangler.toml`。之後在 Pages 專案設定中連接 GitHub repository，使用 `main` 分支、無 build command、輸出目錄為 `.`，並啟用 D1 綁定 `DB` 及 R2 綁定 `LABELS`。
+
+網站開啟後，先在管理者裝置上傳 Excel 和 PDF，再到「共用雲端資料」按「同步目前資料到雲端」。其他同事使用同一個 Cloudflare Pages 網址時，App 會從 D1/R2 載入共用商品、配對和 PDF，不需要重新配對。GitHub Pages 網址只會提供靜態前端，不能執行這組 API。
 
 ## 注意
 
