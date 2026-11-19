@@ -54,17 +54,14 @@ export async function onRequestPost({ request, env }) {
   if (url.pathname.endsWith('/api/products/bulk')) {
     const body = await readJson(request);
     if (!body || !Array.isArray(body.products)) return json({ error: 'products array is required' }, 400);
-    if (body.replace === true) {
-      const ids = body.products.filter(p => p && p.name).map(p => Number(p.id)).filter(Number.isFinite);
-      if (ids.length) await env.DB.prepare(`DELETE FROM products WHERE id NOT IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
-      else await env.DB.prepare('DELETE FROM products').run();
-    }
-    const statements = body.products.filter(p => p && p.name).map(p => env.DB.prepare(`INSERT INTO products (id, name, barcode, barcode2, label_id, updated_at)
+    const statements = [];
+    if (body.replace === true) statements.push(env.DB.prepare('DELETE FROM products'));
+    statements.push(...body.products.filter(p => p && p.name).map(p => env.DB.prepare(`INSERT INTO products (id, name, barcode, barcode2, label_id, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name, barcode=excluded.barcode, barcode2=excluded.barcode2,
       label_id=COALESCE(products.label_id, excluded.label_id), updated_at=excluded.updated_at`).bind(
         Number(p.id), String(p.name), String(p.barcode || ''), String(p.barcode2 || ''), p.labelId || null, now()
-      ));
+      )));
     if (statements.length) await env.DB.batch(statements);
     return json({ ok: true, count: statements.length });
   }
