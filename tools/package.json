@@ -1,0 +1,17 @@
+{
+  "name": "product-label-app-tools",
+  "private": true,
+  "type": "module",
+  "description": "測試工具（不會部署到 Cloudflare Pages）",
+  "scripts": {
+    "test": "node tools/stress-test.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  },
+  "dependencies": {
+    "jsdom": "^29.1.1",
+    "miniflare": "^3.20250718.3",
+    "wrangler": "^4.165.0"
+  }
+}
