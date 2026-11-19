@@ -64,6 +64,15 @@ python3 -m http.server 8080
 npx wrangler pages dev . --d1 DB=product-label-app --r2 LABELS
 ```
 
+## 部署助手
+
+```bash
+node tools/deploy.mjs check          # 部署前檢查（唯讀）：檔案完整性、git 狀態、正式站現況
+node tools/deploy.mjs github         # commit + push（Cloudflare Pages 自動部署）
+node tools/deploy.mjs wrangler       # 或直接 wrangler pages deploy
+node tools/deploy.mjs verify --wait  # 部署後驗證（含商品/標籤筆數沒有變少）
+```
+
 ## 測試
 
 ```bash

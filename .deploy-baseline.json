@@ -1,0 +1,13 @@
+{
+  "url": "https://product-label-app.pages.dev",
+  "checkedAt": "2026-11-19T17:27:37.579Z",
+  "health": {
+    "error": "Not found"
+  },
+  "bootstrapVersion": 1,
+  "products": 22481,
+  "labels": 2,
+  "hasJobsUi": false,
+  "serving": 200,
+  "htmlBytes": 43730
+}
