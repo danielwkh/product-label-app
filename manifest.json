@@ -1,0 +1,24 @@
+{
+  "name": "商品標籤助手",
+  "short_name": "標籤助手",
+  "description": "上傳商品 Excel 與營養標籤 PDF，用條碼搜尋後分享到 WePrint",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f0fdfa",
+  "theme_color": "#0f766e",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
