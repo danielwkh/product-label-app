@@ -632,3 +632,24 @@ tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、�
 - 修正後一次正常開頁只需 **約 2–4 列讀取**（原本 22,481 列），
   等同每天可開頁數從約 220 次提升到數十萬次級別。
 - 若仍想完全避免免費額度風險：Cloudflare 方案升級到 Workers Paid（D1 讀取額度大幅提高）。
+
+### 實際部署與上線驗證（2026-11-19 20:07 UTC）
+
+| 項目 | 結果 |
+|---|---|
+| 推送 | `main` = `3a2dac2`（`71367bf → ae01274 → 17b5c6c → 3a2dac2`） |
+| 靜態檔 | 線上 `index.html`、`js/app.js`(56,539B)、`js/store/api.js`(4,563B)、`js/core/pipeline.js`、`js/core/matcher.js`、`sw-v6.js` 與本地 **SHA-256 完全一致** |
+| Functions | `/api/meta`、`/api/labels` 路由已存在（部署前是 404） |
+| `/api/meta` 回應 | `{"cloud":true,"degraded":true,"schemaError":"D1_ERROR: no such table: meta"}` |
+| `/api/health` 回應 | `{"ok":false,...,"metaTable":false,"schemaError":"D1_ERROR: ... exceeded ... free tier daily row read limit"}` |
+
+**為什麼 meta 表還沒建起來**：`CREATE TABLE IF NOT EXISTS meta` 本身需要讀 schema，而當天的列讀取額度已經用完，
+所以 DDL 也被擋下（`ensureSchema` 會記下 `schemaError` 並在每次請求時重試）。
+**額度在 UTC 午夜（香港 08:00）重置後，第一個 API 請求就會自動建立 `meta` 表，不需要手動跑 SQL。**
+
+在此期間的預期行為（已用 `deploy check` / curl 驗證）：
+
+- `deploy check` → `✅ Functions 是新版（/api/meta 路由存在）` + `⚠️ API 可連線，但 D1 今天讀不到資料`
+- 手機開啟 App → 顯示 `無法連線雲端：D1_ERROR: ... exceeded ... ｜雲端資料庫暫時不可用（D1 免費額度每日 UTC 午夜重置，或可升級方案）`，
+  **不再是誤導的「雲端 API 尚未啟用」**；本機 IndexedDB 資料仍可瀏覽、搜尋、看 PDF。
+- 額度重置後 → 第一次開頁做一次全量 bootstrap 並建立 `meta` 表，之後開頁只需約 2 列讀取。
