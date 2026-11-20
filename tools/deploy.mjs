@@ -491,8 +491,9 @@ async function cmdVerify() {
   let healthJson = null;
   try { healthJson = JSON.parse(health.text); } catch { /* ignore */ }
   if (healthJson && healthJson.ok) {
-    ok(`/api/health 正常：products ${healthJson.products} / labels ${healthJson.labels} / r2 ${healthJson.r2}`);
-    if (healthJson.productsRevision) info(`products_revision ${healthJson.productsRevision} / labels_revision ${healthJson.labelsRevision}`);
+    ok(`/api/health 正常（r2 ${healthJson.r2}, meta 表 ${healthJson.metaTable === false ? '待建立' : '正常'}）`);
+    info(`products_revision ${healthJson.productsRevision} / labels_revision ${healthJson.labelsRevision}`
+      + (healthJson.products != null ? ` · products ${healthJson.products} / labels ${healthJson.labels}` : '（新版 health 不再做 COUNT(*)，不燒額度）'));
   } else if (isD1Quota(health.text)) {
     warn('/api/health 路由存在（新 Functions 已上線），但 D1 免費額度用完，讀不到資料');
     warn('  → 這不是部署失敗；UTC 午夜（香港 08:00）重置，或升級 Workers Paid');

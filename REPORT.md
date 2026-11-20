@@ -653,3 +653,52 @@ tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、�
 - 手機開啟 App → 顯示 `無法連線雲端：D1_ERROR: ... exceeded ... ｜雲端資料庫暫時不可用（D1 免費額度每日 UTC 午夜重置，或可升級方案）`，
   **不再是誤導的「雲端 API 尚未啟用」**；本機 IndexedDB 資料仍可瀏覽、搜尋、看 PDF。
 - 額度重置後 → 第一次開頁做一次全量 bootstrap 並建立 `meta` 表，之後開頁只需約 2 列讀取。
+
+---
+
+## 12. 額度重置後的正式站複驗（2026-11-20 05:56 UTC / 13:56 HKT）
+
+`meta` 表在額度重置後**由 API 自動建立**（`degraded:false`），不需要手動跑 SQL。
+
+### `tools/live-verify.mjs`：20 / 20 通過
+
+```
+=== 1. 便宜的版本檢查 ===
+✅ /api/meta 200、degraded:false、不含商品陣列
+✅ x-d1-rows-read: 2
+
+=== 2. bootstrap ===
+✅ 200，2,279ms，3,299KB
+✅ 商品 22,481（資料一筆沒少）
+✅ 標籤 176（174 筆有新 hash，2 筆舊格式）
+✅ 每個標籤都有 hash 欄位
+✅ ETag W/"bootstrap-3.5" + x-data-revision
+✅ 帶 If-None-Match 回 304（0 次商品表讀取）
+
+=== 3. /api/labels ===
+✅ 只回 176 個標籤（71.3KB），完全不含 22,481 筆商品
+
+=== 4. Range ===
+✅ 206 bytes 0-1023/67981
+
+=== 5. 端到端 ===
+✅ 上傳（deduped:false）→ 重複上傳（deduped:true，R2 沒重寫）
+✅ labels_revision 由 1 → 3（寫入會遞增，前端才知道要更新）
+✅ 批次配對同步 count:1
+✅ 下載內容一致（191 bytes）· Range 206 bytes 0-99/191
+✅ 刪除暫存標籤，標籤數回到 176（測試資料完全清除），revision 3 → 5
+```
+
+`node tools/deploy.mjs verify`：**驗證通過**（前端 7 項、vendor 4 項、health、商品 22,481 / 標籤 176、Range 206）。
+
+### 讀取成本對照（正式站實測）
+
+| 情境 | D1 讀取列數 | 備註 |
+|---|---|---|
+| 一般開頁（revision 沒變） | `/api/meta` **2 列** + `/api/labels` 176 列 = **178** | 原本 22,481 |
+| 開頁且 revision 變了 | 22,481（一次）+ 之後走上面那條 | 有 `cache-control: max-age=60` 與 ETag |
+| 再次請求 bootstrap 且 revision 未變 | **0**（304） | 已實測 `status=304` |
+| `/api/health` | **2 列** | 原本約 45,000 |
+
+以 500 萬列/日計算：修正前約 **220 次開頁**就會用完；修正後一般開頁約 178 列，
+可支撐**約 28,000 次開頁／日**，等於同一個免費額度下安全邊界提高約 126 倍。
