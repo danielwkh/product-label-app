@@ -179,6 +179,44 @@ check('選取清單已清空', state.selectedLabelIds.size === 0);
 check('剩下 dupA-2 與 single-1', Object.keys(state.labels).sort().join(',') === 'dupA-2,single-1', Object.keys(state.labels).join(','));
 check('本機只剩下 2 個 Blob', (await db.blobBytes()).count === 2, `${(await db.blobBytes()).count}`);
 
+/* ------------------------------- 7. 雲端路徑（改名 / 批次刪除的請求內容） */
+console.log('\n=== 7. 有雲端時的請求內容 ===');
+const requests = [];
+globalThis.fetch = async (url, init = {}) => {
+  requests.push({ url: String(url), method: init.method || 'GET', body: init.body });
+  return new Response(JSON.stringify({ ok: true, deleted: 1, ids: [] }), {
+    status: 200, headers: { 'content-type': 'application/json' }
+  });
+};
+state.cloudEnabled = true;
+
+state.labels['cloud-1'] = makeLabel('cloud-1', 'hash-c1', '雲端標籤 A', { uploaded: true });
+state.labels['cloud-2'] = makeLabel('cloud-2', 'hash-c2', '雲端標籤 B', { uploaded: true });
+await db.putLabel(state.labels['cloud-1']);
+await db.putLabel(state.labels['cloud-2']);
+window.app.renderMatchList();
+
+await window.app.renameLabel('cloud-1', '雲端標籤 A（修正）');
+await wait(150);
+const patchReq = requests.find(r => r.method === 'PATCH');
+check('改名會送 PATCH 到 /api/labels/:id', Boolean(patchReq && patchReq.url.includes('/api/labels/cloud-1')),
+  patchReq && `${patchReq.method} ${patchReq.url}`);
+check('PATCH 只送 nameFromFile（不會洗掉配對）',
+  Boolean(patchReq) && Object.keys(JSON.parse(patchReq.body)).join(',') === 'nameFromFile',
+  patchReq && patchReq.body);
+
+requests.length = 0;
+state.selectedLabelIds = new Set(['cloud-1', 'cloud-2']);
+window.app.renderMatchList();
+document.getElementById('bulkDeleteBtn').dispatchEvent(new window.Event('click'));
+await wait(300);
+const bulkReq = requests.find(r => r.url.includes('bulk-delete'));
+check('多筆刪除走 POST /api/labels/bulk-delete', Boolean(bulkReq), bulkReq && bulkReq.method);
+check('送出正確的 ids', Boolean(bulkReq) && JSON.parse(bulkReq.body).ids.join(',') === 'cloud-1,cloud-2',
+  bulkReq && bulkReq.body);
+check('雲端標籤已從畫面移除', !state.labels['cloud-1'] && !state.labels['cloud-2']);
+state.cloudEnabled = false;
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);
