@@ -201,12 +201,54 @@ const health = await response.json();
 check('health 回報 D1/R2 狀態（且附 revision）', health.ok === true && health.r2 === true && Boolean(health.productsRevision), JSON.stringify(health));
 
 /* 9. DELETE */
+console.log('\n=== 8. 改標籤名稱（部分更新）與重複標籤批次刪除 ===');
+// 先給第一個標籤一個配對，確認「只改名稱」不會把配對洗掉
+const targetId = uploaded[0].id;
+await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(targetId)}`, { method: 'PATCH', ...json({
+    productId: 1, matchedProductName: '測試商品', matchSource: 'manual', matchConfidence: 'manual'
+  }) }),
+  env
+});
+let row = await db.prepare('SELECT product_id AS pid, matched_product_name AS name FROM labels WHERE id = ?').bind(targetId).first();
+check('PATCH 可設定配對', row.pid === 1 && row.name === '測試商品', JSON.stringify(row));
+
+const renameRes = await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(targetId)}`, { method: 'PATCH', ...json({ nameFromFile: '修正後名稱' }) }),
+  env
+});
+const renameBody = await renameRes.json();
+row = await db.prepare('SELECT name_from_file AS nf, product_id AS pid, matched_product_name AS name, match_source AS src FROM labels WHERE id = ?').bind(targetId).first();
+check('只傳 nameFromFile 也能改名', renameBody.ok === true && row.nf === '修正後名稱', JSON.stringify(row));
+check('改名不會清掉原本的配對（部分更新）', row.pid === 1 && row.name === '測試商品' && row.src === 'manual', JSON.stringify(row));
+
+const metaBeforeBulk = await (await api.onRequestGet({ request: request('/api/meta'), env })).json();
+const bulkIds = [uploaded[1].id, uploaded[2].id];
+await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(bulkIds[0])}`, { method: 'PATCH', ...json({ productId: 2, matchedProductName: '批次刪除用' }) }),
+  env
+});
+const bulkRes = await api.onRequestPost({ request: request('/api/labels/bulk-delete', json({ ids: bulkIds })), env });
+const bulkBody = await bulkRes.json();
+const left = await db.prepare('SELECT COUNT(*) AS n FROM labels').first();
+const orphan = await db.prepare('SELECT COUNT(*) AS n FROM products WHERE label_id = ?').bind(bulkIds[0]).first();
+check('批次刪除回報刪除筆數', bulkBody.ok === true && bulkBody.deleted === 2, JSON.stringify(bulkBody));
+check('D1 標籤數減少 2', left.n === 172, `${left.n}`);
+check('被刪標籤的商品連結已清除', orphan.n === 0, `殘留 ${orphan.n}`);
+const r2AfterBulk = await r2.list({ prefix: 'labels/' });
+check('R2 物件同步刪除', r2AfterBulk.objects.length === 172, `${r2AfterBulk.objects.length} 個`);
+const metaAfterBulk = await (await api.onRequestGet({ request: request('/api/meta'), env })).json();
+check('批次刪除會遞增 labels_revision', metaAfterBulk.labelsRevision !== metaBeforeBulk.labelsRevision,
+  `${metaBeforeBulk.labelsRevision} → ${metaAfterBulk.labelsRevision}`);
+const emptyBody = await (await api.onRequestPost({ request: request('/api/labels/bulk-delete', json({ ids: [] })), env })).json();
+check('空 ids 會被拒絕', Boolean(emptyBody.error), JSON.stringify(emptyBody));
+
 console.log('\n=== 9. 刪除單一標籤 ===');
-const deleteId = uploaded[1].id;
+const deleteId = uploaded[3].id;   // 1、2 已在批次刪除中移除
 response = await api.onRequestDelete({ request: request(`/api/labels/${encodeURIComponent(deleteId)}`, { method: 'DELETE' }), env });
 const afterDelete = await db.prepare('SELECT COUNT(*) AS n FROM labels').first();
 const r2After = await r2.list({ prefix: 'labels/' });
-check('刪除後 D1 與 R2 都少一筆', afterDelete.n === 173 && r2After.objects.length === 173, `D1 ${afterDelete.n} / R2 ${r2After.objects.length}`);
+check('刪除後 D1 與 R2 都少一筆', afterDelete.n === 171 && r2After.objects.length === 171, `D1 ${afterDelete.n} / R2 ${r2After.objects.length}`);
 
 /* 10. 未設定 binding 的友善錯誤 */
 response = await api.onRequestGet({ request: request('/api/bootstrap'), env: {} });

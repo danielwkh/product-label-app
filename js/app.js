@@ -44,6 +44,7 @@ const state = {
   localSnapshotWriter: null,   // 測試用注入點
   localWarning: null,
   currentMatchLabelId: null,
+  editingLabelId: null,
   preview: { url: null, labelId: null, pdf: null, page: 1 },
   scanning: null,
   blobCache: new Map()
@@ -744,32 +745,216 @@ function getLabelProduct(label) {
   return null;
 }
 
+/* ------------------------------------------------- 重複標籤 / 編輯刪除 */
+
+// 重複判定：以 PDF 內容指紋（hash）為主；舊資料沒有 hash 時退回用名稱
+function labelDupKey(label) {
+  const hash = label.hash || label.contentHash;
+  if (hash) return `h:${hash}`;
+  return `n:${normalize(label.nameFromFile || label.filename || '')}`;
+}
+
+// 回傳 Map<labelId, 同組筆數>
+function duplicateMap(labels) {
+  const groups = new Map();
+  for (const label of labels) {
+    const key = labelDupKey(label);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(label);
+  }
+  const map = new Map();
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    for (const label of list) map.set(label.id, list.length);
+  }
+  return map;
+}
+
+// 每組保留哪一筆：人工配對優先 → 已配對 → 最新上傳
+function pickKeeper(list) {
+  const score = label => (label.matchSource === 'manual' ? 3 : label.matchedProductName ? 2 : 1);
+  return [...list].sort((a, b) => score(b) - score(a)
+    || String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')))[0];
+}
+
+function extraDuplicateIds(labels) {
+  const groups = new Map();
+  for (const label of labels) {
+    const key = labelDupKey(label);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(label);
+  }
+  const extras = [];
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const keeper = pickKeeper(list);
+    for (const label of list) if (label.id !== keeper.id) extras.push(label.id);
+  }
+  return extras;
+}
+
+// 刪除標籤：雲端（R2 + D1）、本機（IndexedDB + Blob）、商品連結一起處理
+async function deleteLabels(ids, options = {}) {
+  const targets = ids.map(id => state.labels[id]).filter(Boolean);
+  if (!targets.length) return 0;
+
+  let cloudFailed = 0;
+  const cloudIds = targets.filter(label => label.uploaded).map(label => label.id);
+  if (state.cloudEnabled && cloudIds.length) {
+    try {
+      if (cloudIds.length === 1) await api.deleteLabel(cloudIds[0]);
+      else await api.bulkDeleteLabels(cloudIds);
+    } catch (err) {
+      cloudFailed = cloudIds.length;
+      console.warn('[labels] 雲端刪除失敗，僅刪除本機', err);
+    }
+  }
+
+  const changedProducts = [];
+  for (const label of targets) {
+    const stillUsed = Object.values(state.labels)
+      .some(other => other.id !== label.id && other.hash && other.hash === label.hash);
+    try { await db.deleteLabelRecord(label.id); } catch (err) { console.warn('[labels] 本機記錄刪除失敗', err); }
+    if (label.hash && !stillUsed) {
+      try { await db.deleteBlob(label.hash); } catch (err) { console.warn('[labels] 本機 Blob 刪除失敗', err); }
+    }
+    for (const product of state.products) {
+      if (product.labelId === label.id) {
+        product.labelId = null;
+        changedProducts.push(product);
+      }
+    }
+    delete state.labels[label.id];
+    state.selectedLabelIds.delete(label.id);
+  }
+  if (changedProducts.length) {
+    try { await db.putProducts(changedProducts); } catch (err) { console.warn('[labels] 商品連結更新失敗', err); }
+  }
+
+  try {
+    pipeline.setLabels(state.labels);
+    matcher.setManualLabelIds(manualLabelIdSet());
+  } catch (err) { console.warn('[labels] 重新整理配對索引失敗', err); }
+  updateStats();
+  renderMatchList();
+  if (!options.silent) {
+    toast(cloudFailed
+      ? `已在本機刪除 ${targets.length} 筆；雲端刪除失敗（下次連線補做）`
+      : `已刪除 ${targets.length} 個標籤`);
+  }
+  return targets.length;
+}
+
+async function renameLabel(id, rawName) {
+  const label = state.labels[id];
+  if (!label) return false;
+  const name = String(rawName || '').trim().slice(0, 200);
+  if (!name) {
+    toast('名稱不能空白');
+    return false;
+  }
+  if (name === (label.nameFromFile || '')) return true;
+
+  label.nameFromFile = name;
+  label.updatedAt = nowISO();
+  try { await db.putLabel(label); } catch (err) { console.warn('[labels] 本機名稱更新失敗', err); }
+
+  let cloudNote = '';
+  if (state.cloudEnabled && label.uploaded) {
+    try {
+      await api.patchLabel(id, { nameFromFile: name });
+    } catch (err) {
+      cloudNote = '（雲端尚未更新，稍後按「同步」會補送）';
+      console.warn('[labels] 改名同步失敗', err);
+    }
+  }
+  try { pipeline.setLabels(state.labels); } catch { /* ignore */ }
+  renderMatchList();
+  toast(`已更新標籤名稱${cloudNote}`);
+  return true;
+}
+
+/* ------------------------------------------------------- 編輯標籤視窗 */
+
+function openEditLabelModal(id) {
+  const label = state.labels[id];
+  if (!label) return;
+  state.editingLabelId = id;
+  $('editLabelOrig').textContent = `原始檔名：${label.filename || '（無）'}`;
+  $('editLabelNameInput').value = label.nameFromFile || label.filename || '';
+  const info = $('editLabelMatchInfo');
+  info.textContent = label.matchedProductName
+    ? `目前配對：${label.matchedProductName}${label.matchSource === 'manual' ? '（人工）' : '（自動）'}`
+    : '目前尚未配對任何商品';
+  $('editLabelModal').classList.add('show');
+}
+
+function closeEditLabelModal() {
+  $('editLabelModal').classList.remove('show');
+  state.editingLabelId = null;
+}
+
 function renderMatchList() {
   const el = $('matchList');
   if (!el) return;
   const all = Object.values(state.labels).map(label => ({ ...label }));
+  const dups = duplicateMap(all);
+  const dupExtras = extraDuplicateIds(all);
+
+  const passesFilter = l => {
+    switch (state.matchFilter) {
+      case 'matched': return Boolean(l.matchedProductName);
+      case 'review': return l.matchConfidence === 'review';
+      case 'unmatched': return !l.matchedProductName;
+      case 'dup': return dups.has(l.id);
+      default: return true;
+    }
+  };
   const filtered = all
-    .filter(l => state.matchFilter === 'all' || (state.matchFilter === 'matched'
-      ? l.matchedProductName
-      : state.matchFilter === 'review'
-        ? l.matchConfidence === 'review'
-        : !l.matchedProductName))
+    .filter(passesFilter)
     .filter(l => {
       if (!state.matchQuery) return true;
       const q = normalize(state.matchQuery);
       return normalize(`${l.nameFromFile || ''} ${l.matchedProductName || ''}`).includes(q);
     });
 
-  filtered.sort((a, b) => state.matchSort === 'name'
-    ? normalize(a.nameFromFile).localeCompare(normalize(b.nameFromFile), 'zh-Hant')
-    : state.matchSort === 'newest'
-      ? String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || ''))
-      : Number(!a.matchedProductName) - Number(!b.matchedProductName));
+  filtered.sort((a, b) => {
+    if (state.matchFilter === 'dup') {
+      // 同一組重複要排在一起，方便一眼比較
+      const byGroup = labelDupKey(a).localeCompare(labelDupKey(b));
+      if (byGroup !== 0) return byGroup;
+    }
+    return state.matchSort === 'name'
+      ? normalize(a.nameFromFile).localeCompare(normalize(b.nameFromFile), 'zh-Hant')
+      : state.matchSort === 'newest'
+        ? String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || ''))
+        : Number(!a.matchedProductName) - Number(!b.matchedProductName);
+  });
 
   const visibleIds = new Set(filtered.map(l => l.id));
   for (const id of [...state.selectedLabelIds]) if (!visibleIds.has(id)) state.selectedLabelIds.delete(id);
 
-  $('matchSummary').textContent = `顯示 ${filtered.length} / ${all.length} 個標籤 · 已配對 ${all.filter(x => x.matchedProductName).length} · 待確認 ${all.filter(x => x.matchConfidence === 'review').length} · 未配對 ${all.filter(x => !x.matchedProductName).length}`;
+  const dupGroups = new Set([...dups.keys()].map(id => labelDupKey(state.labels[id] || {}))).size;
+  $('matchSummary').textContent = `顯示 ${filtered.length} / ${all.length} 個標籤 · 已配對 ${all.filter(x => x.matchedProductName).length}`
+    + ` · 待確認 ${all.filter(x => x.matchConfidence === 'review').length}`
+    + ` · 未配對 ${all.filter(x => !x.matchedProductName).length}`
+    + (dupExtras.length ? ` · 重複 ${dupGroups} 組（多出 ${dupExtras.length} 筆）` : '');
+
+  const dupCountEl = $('dupCount');
+  if (dupCountEl) dupCountEl.textContent = String(dupExtras.length);
+  const banner = $('dupBanner');
+  if (banner) {
+    const text = $('dupBannerText');
+    if (dupExtras.length && state.matchFilter !== 'dup') {
+      banner.style.display = '';
+      if (text) text.innerHTML = `🔁 發現 <b>${dupGroups}</b> 組重複，共 <b>${dupExtras.length}</b> 筆是多餘的（內容相同）。`
+        + ' 建議先確認要保留哪一筆，再「每組只留一筆」。';
+    } else if (!dupExtras.length) {
+      banner.style.display = 'none';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
 
   if (!filtered.length) {
     el.innerHTML = '<div class="empty"><div class="icon">📄</div>沒有符合條件的項目</div>';
@@ -794,6 +979,7 @@ function renderMatchList() {
         ${l.hasLocalBlob ? '<span class="tag-offline">本機可離線</span>' : (l.uploaded ? '<span class="tag-offline">雲端</span>' : '')}
         ${l.matchScore && !manual ? `<span>信心 ${l.matchScore}${l.matchGap != null ? ` · 差距 ${l.matchGap}` : ''}</span>` : ''}
       </div>
+      ${dups.get(l.id) ? `<div><span class="tag-dup">重複 ×${dups.get(l.id)}</span></div>` : ''}
       ${l.matchWhy && !manual ? `<div class="score-note">判斷依據：${escapeHtml(l.matchWhy)}</div>` : ''}
       <div class="label-actions">
         ${linked
@@ -801,6 +987,9 @@ function renderMatchList() {
              <button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">重新配對</button>`
           : `<button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">手動配對</button>`}
         <button class="btn btn-outline btn-sm" data-action="preview" data-id="${escapeHtml(l.id)}">預覽</button>
+        <button class="btn btn-outline btn-sm" data-action="edit" data-id="${escapeHtml(l.id)}">✏️ 編輯</button>
+        <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(l.id)}">刪除</button>
+        ${dups.get(l.id) ? `<button class="btn btn-primary btn-sm" data-action="keep" data-id="${escapeHtml(l.id)}">保留這筆，刪除其他 ${dups.get(l.id) - 1} 筆</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -1218,6 +1407,23 @@ function bindEvents() {
       if (action === 'preview') previewLabel(id);
       else if (action === 'match') openMatchModal(id);
       else if (action === 'unlink') unlinkLabel(id);
+      else if (action === 'edit') openEditLabelModal(id);
+      else if (action === 'delete') {
+        const label = state.labels[id];
+        const name = label ? (label.nameFromFile || label.filename) : id;
+        if (confirm(`刪除標籤「${name}」？\n雲端的 PDF 檔案也會一起刪除，無法復原。`)) deleteLabels([id]);
+      } else if (action === 'keep') {
+        const label = state.labels[id];
+        if (!label) return;
+        const key = labelDupKey(label);
+        const others = Object.values(state.labels)
+          .filter(other => other.id !== id && labelDupKey(other) === key)
+          .map(other => other.id);
+        if (!others.length) return;
+        if (confirm(`保留「${label.nameFromFile || label.filename}」，刪除其他 ${others.length} 筆相同內容的標籤？`)) {
+          deleteLabels(others);
+        }
+      }
       return;
     }
   });
@@ -1310,6 +1516,65 @@ function bindEvents() {
     if (state.cloudEnabled) await syncMatchMetadata();
     showStatus('pdfStatus', `已重新配對 ${changed} 項${skipped ? `；跳過人工鎖定 ${skipped} 項` : ''}`);
     toast(`已重新配對 ${changed} 項`);
+  });
+
+  $('bulkDeleteBtn').addEventListener('click', async () => {
+    const ids = [...state.selectedLabelIds];
+    if (!ids.length) {
+      toast('請先勾選要刪除的標籤');
+      return;
+    }
+    if (!confirm(`刪除所選 ${ids.length} 個標籤？\n雲端的 PDF 檔案也會一起刪除，無法復原。`)) return;
+    await deleteLabels(ids);
+  });
+
+  $('dupKeepOneBtn').addEventListener('click', async () => {
+    const extras = extraDuplicateIds(Object.values(state.labels));
+    if (!extras.length) {
+      toast('目前沒有重複的標籤');
+      return;
+    }
+    if (!confirm(`每組重複只保留 1 筆（人工配對優先、其次最新上傳），刪除其他 ${extras.length} 筆？\n雲端 PDF 也會一併刪除。`)) return;
+    const removed = await deleteLabels(extras);
+    toast(`已刪除 ${removed} 筆重複標籤`);
+  });
+
+  $('dupSelectAllBtn').addEventListener('click', () => {
+    const extras = extraDuplicateIds(Object.values(state.labels));
+    for (const id of extras) state.selectedLabelIds.add(id);
+    state.matchFilter = 'dup';
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.filter === 'dup');
+    });
+    state.renderLimit = Math.max(state.renderLimit, extras.length + 10);
+    renderMatchList();
+    toast(`已勾選 ${extras.length} 筆多餘的重複標籤`);
+  });
+
+  /* 編輯標籤視窗 */
+  $('editLabelSaveBtn').addEventListener('click', async () => {
+    const id = state.editingLabelId;
+    if (!id) return;
+    const ok = await renameLabel(id, $('editLabelNameInput').value);
+    if (ok) closeEditLabelModal();
+  });
+  $('editLabelPickBtn').addEventListener('click', () => {
+    const id = state.editingLabelId;
+    if (!id) return;
+    closeEditLabelModal();
+    openMatchModal(id);
+  });
+  $('editLabelDeleteBtn').addEventListener('click', async () => {
+    const id = state.editingLabelId;
+    if (!id) return;
+    const label = state.labels[id];
+    if (!confirm(`刪除標籤「${label ? (label.nameFromFile || label.filename) : id}」？雲端 PDF 也會刪除。`)) return;
+    closeEditLabelModal();
+    await deleteLabels([id]);
+  });
+  $('editLabelCloseBtn').addEventListener('click', closeEditLabelModal);
+  $('editLabelModal').addEventListener('click', event => {
+    if (event.target === $('editLabelModal')) closeEditLabelModal();
   });
 
   $('bulkUnlinkBtn').addEventListener('click', async () => {
@@ -1535,7 +1800,16 @@ window.app = {
   confirmMatch,
   doSearch,
   syncAllToCloud,
-  getLabelBlob
+  getLabelBlob,
+  // 標籤編輯 / 重複管理（測試與除錯用）
+  renderMatchList,
+  deleteLabels,
+  renameLabel,
+  openEditLabelModal,
+  closeEditLabelModal,
+  duplicateMap,
+  extraDuplicateIds,
+  labelDupKey
 };
 
 boot();

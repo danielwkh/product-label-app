@@ -111,6 +111,15 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       });
     },
 
+    async bulkDeleteLabels(ids) {
+      return request('labels/bulk-delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids }),
+        timeoutMs: 60000
+      });
+    },
+
     async deleteLabel(id) {
       return request(`labels/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },

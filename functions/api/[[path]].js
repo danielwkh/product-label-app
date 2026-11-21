@@ -378,6 +378,35 @@ export async function onRequestPost({ request, env }) {
   }
 
   /* 上傳 PDF（multipart） */
+  /* 批次刪除：重複標籤一次清掉，不用送幾十個 DELETE */
+  if (url.pathname.endsWith('/api/labels/bulk-delete')) {
+    await ensureSchema(env);
+    const body = await readJson(request);
+    const ids = Array.isArray(body && body.ids) ? body.ids.map(String).filter(Boolean) : [];
+    if (!ids.length) return json({ error: 'ids array is required' }, 400);
+    if (ids.length > 300) return json({ error: '一次最多刪除 300 筆' }, 400);
+
+    const rows = await env.DB.prepare(
+      `SELECT id, r2_key AS r2Key FROM labels WHERE id IN (${ids.map(() => '?').join(',')})`
+    ).bind(...ids).all();
+    const found = rows.results || [];
+    if (env.LABELS) {
+      for (const row of found) {
+        if (row.r2Key) await env.LABELS.delete(row.r2Key).catch(() => {});
+      }
+    }
+    const timestamp = now();
+    const statements = [
+      env.DB.prepare(`UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id IN (${ids.map(() => '?').join(',')})`)
+        .bind(timestamp, ...ids),
+      env.DB.prepare(`DELETE FROM labels WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids)
+    ];
+    await env.DB.batch(statements);
+    await bumpRevision(env, 'labels_revision');
+    await bumpRevision(env, 'products_revision');
+    return json({ ok: true, deleted: found.length, ids: found.map(row => row.id) });
+  }
+
   if (url.pathname.endsWith('/api/labels')) {
     await ensureSchema(env);
     if (!env.LABELS) return json({ error: 'R2 binding LABELS is not configured' }, 503);
@@ -460,29 +489,51 @@ export async function onRequestPatch({ request, env }) {
 
   const body = await readJson(request);
   if (!body) return json({ error: 'JSON body is required' }, 400);
+
+  const existing = await env.DB.prepare('SELECT * FROM labels WHERE id = ?').bind(id).first();
+  if (!existing) return json({ error: 'Label not found', id }, 404);
+
+  // 部分更新：只改 body 有帶的欄位，其他保持原值
+  // （舊版一律覆寫，前端只傳 nameFromFile 時會把配對資料清空）
+  const pick = (key, current) => (Object.prototype.hasOwnProperty.call(body, key) ? body[key] : current);
+  const numberOrNull = value => (value == null || value === '' ? null : Number(value));
   const timestamp = now();
 
-  await env.DB.prepare(`UPDATE labels SET product_id=?, matched_product_name=?, match_source=?, match_score=?,
-      match_confidence=?, match_gap=?, match_why=?, updated_at=? WHERE id=?`).bind(
-    body.productId == null ? null : Number(body.productId),
-    body.matchedProductName || null,
-    body.matchSource || null,
-    body.matchScore == null ? null : Number(body.matchScore),
-    body.matchConfidence || null,
-    body.matchGap == null ? null : Number(body.matchGap),
-    body.matchWhy || null,
+  const nameFromFile = pick('nameFromFile', existing.name_from_file);
+  const productId = numberOrNull(pick('productId', existing.product_id));
+  const matchedProductName = pick('matchedProductName', existing.matched_product_name);
+  const matchSource = pick('matchSource', existing.match_source);
+  const matchScore = numberOrNull(pick('matchScore', existing.match_score));
+  const matchConfidence = pick('matchConfidence', existing.match_confidence);
+  const matchGap = numberOrNull(pick('matchGap', existing.match_gap));
+  const matchWhy = pick('matchWhy', existing.match_why);
+
+  await env.DB.prepare(`UPDATE labels SET name_from_file=?, product_id=?, matched_product_name=?, match_source=?,
+      match_score=?, match_confidence=?, match_gap=?, match_why=?, updated_at=? WHERE id=?`).bind(
+    nameFromFile == null ? null : String(nameFromFile).slice(0, 300),
+    productId == null || Number.isNaN(productId) ? null : productId,
+    matchedProductName || null,
+    matchSource || null,
+    matchScore == null || Number.isNaN(matchScore) ? null : matchScore,
+    matchConfidence || null,
+    matchGap == null || Number.isNaN(matchGap) ? null : matchGap,
+    matchWhy || null,
     timestamp,
     id
   ).run();
 
-  await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id = ?').bind(timestamp, id).run();
-  await bumpRevision(env, 'labels_revision');
-  await bumpRevision(env, 'products_revision');
-  if (body.productId != null) {
-    await env.DB.prepare('UPDATE products SET label_id = ?, updated_at = ? WHERE id = ?')
-      .bind(id, timestamp, Number(body.productId)).run();
+  // 配對有變動才去改 products.label_id（省寫入）
+  const productChanged = productId !== (existing.product_id == null ? null : Number(existing.product_id));
+  if (productChanged) {
+    await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id = ?').bind(timestamp, id).run();
+    if (productId != null) {
+      await env.DB.prepare('UPDATE products SET label_id = ?, updated_at = ? WHERE id = ?')
+        .bind(id, timestamp, productId).run();
+    }
+    await bumpRevision(env, 'products_revision');
   }
-  return json({ ok: true, id });
+  await bumpRevision(env, 'labels_revision');
+  return json({ ok: true, id, nameFromFile });
 }
 
 /* --------------------------------------------------------------- DELETE */
