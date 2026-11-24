@@ -805,3 +805,20 @@ tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、�
 ```
 
 回歸：`api-integration` 32/32 ✅、`ui-smoke` ✅（174 PDF）、`label-edit-smoke` 38/38 ✅、`stress-test` T1–T12 ✅。
+
+### 上線與驗證（2026-11-24 15:03 UTC）
+
+`main` = `45f8e07`（Cloudflare Pages 已建置）。正式站實測 **14 + 20 項全部通過**：
+
+```
+✅ index.html：id="pdfInput" multiple（已移除 accept，iOS 可選 .wdfx）
+✅ /js/core/filetype.js 已上線；/js/app.js 含「無法在網站內預覽」
+✅ /api/health ok、meta 表存在（products_revision 5 / labels_revision 7）
+✅ 既有 176 筆標籤的 mime 欄位自動補上預設值（176/176）
+✅ 上傳 .wdfx（副檔名 wdfx、mime octet-stream）：檔案名、mime、顯示名稱都正確
+✅ 下載 Content-Type: application/octet-stream（不再硬寫 application/pdf）
+✅ Content-Disposition 保留 洗髮精 400ml.wdfx（inline 與 ?download=1 的 attachment）
+✅ Range 206（bytes 0-9/69）對非 PDF 副檔名同樣正常
+✅ bootstrap 商品 22,481 筆不變、ETag 304、標籤 176 筆
+✅ 測試用暫存標籤已刪除，標籤數回到 176
+```
