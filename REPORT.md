@@ -971,3 +971,23 @@ if (!files.length) { toast('沒有可處理的 PDF'); return; }
 `/api/labels` 回傳 deferred）；`tools/label-edit-smoke.mjs` **82 / 82**（新增 12 項：
 延後後排最後、標記顯示、數字統計、未配對排除延後、已延後篩選、批次延後、取消還原、IndexedDB 持久化）。
 `ui-smoke` 全數通過；`sw-v6.js` → `v13`。
+
+### 順帶修正：商品與標籤「分開比版本」（大幅降低 D1 讀取）
+
+上線後（2026-11-24 21:14 UTC）D1 免費額度再次用盡，原因是：**只要標籤有任何變動，
+合併版本的 revision 就變**，於是下一次開頁又整包讀 22,481 列商品。
+
+改成兩條版本線：
+
+| 版本 | 什麼時候變 | 開頁成本 |
+|---|---|---|
+| `productsRevision` | 商品清單（Excel）變動 | 變了才 bootstrap（22,481 列） |
+| `labelsRevision` | 上傳／配對／改名／延後／刪除 | 只補抓 `/api/labels`（幾百列） |
+
+前端在 IndexedDB 分別記住這兩個版本（`cloudProductsRevision` / `cloudLabelsRevision`），
+所以「只改標籤」的日子裡，開頁只讀 **2 列 meta（＋必要時幾百列標籤）**，完全不碰商品表。
+
+`bootstrap` 回應也新增 `productsRevision` / `labelsRevision` 兩個欄位。
+
+測試：`tools/cloud-smoke.mjs` 新增「只有標籤版本變動 → 完全不重抓商品」與
+「只補抓標籤」兩項，全部通過（全 20 項）。

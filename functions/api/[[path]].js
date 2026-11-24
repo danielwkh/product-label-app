@@ -206,11 +206,12 @@ export async function onRequestGet({ request, env, context }) {
     //   同一個 revision 只會真的查一次 D1，其他請求由 Cloudflare 邊緣直接回應
     const requestedRevision = url.searchParams.get('rev');
     const ifNoneMatch = request.headers.get('if-none-match');
-    let revision = requestedRevision;
-    if (!revision) {
-      const meta = await readMeta(env, ['products_revision', 'labels_revision']);
-      revision = `${meta.products_revision || '0'}.${meta.labels_revision || '0'}`;
-    }
+    const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+    const revisionParts = {
+      products: String(meta.products_revision || '0'),
+      labels: String(meta.labels_revision || '0')
+    };
+    let revision = requestedRevision || `${revisionParts.products}.${revisionParts.labels}`;
     const etag = `W/"bootstrap-${revision}"`;
     if (ifNoneMatch && ifNoneMatch === etag) {
       return new Response(null, { status: 304, headers: { etag, 'cache-control': 'public, max-age=60' } });
@@ -238,7 +239,9 @@ export async function onRequestGet({ request, env, context }) {
       labels: labels.results || [],
       cloud: true,
       version: 2,
-      revision
+      revision,
+      productsRevision: revisionParts.products,
+      labelsRevision: revisionParts.labels
     };
     const response = new Response(JSON.stringify(payload), {
       headers: {

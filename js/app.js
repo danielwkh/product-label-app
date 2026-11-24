@@ -445,27 +445,39 @@ async function loadCloudData() {
       console.warn('[cloud] meta 檢查失敗，改用完整 bootstrap', err);
     }
 
-    if (meta && meta.cloud) {
+    if (meta && meta.cloud && !meta.degraded) {
       state.cloudEnabled = true;
       state.cloudError = null;
-      const localRevision = await db.getMeta('cloudRevision');
-      const localCount = await db.countProducts();
-      const upToDate = localRevision === meta.revision && localCount === state.products.length && localCount > 0;
 
-      if (upToDate) {
-        // 商品沒有變動：只抓標籤（通常幾十列），完全不碰 22,481 列的商品表
-        try {
-          const labelData = await api.labelList();
-          mergeRemoteLabels(labelData.labels || []);
-          await db.putLabels(Object.values(state.labels), 40).catch(() => {});
-        } catch (err) {
-          console.warn('[cloud] 標籤同步失敗', err);
+      // 商品與標籤分開比版本：
+      //   商品很少變動（22,481 列，讀一次很貴），標籤常常變動（幾百列）。
+      //   只有「商品版本」變了才需要整包 bootstrap；只改標籤時完全不碰商品表。
+      const storedProductsRev = await db.getMeta('cloudProductsRevision');
+      const storedLabelsRev = await db.getMeta('cloudLabelsRevision');
+      const localCount = await db.countProducts();
+      const productsFresh = localCount > 0
+        && localCount === state.products.length
+        && storedProductsRev === String(meta.productsRevision);
+
+      if (productsFresh) {
+        let labelsChanged = storedLabelsRev !== String(meta.labelsRevision);
+        if (labelsChanged) {
+          try {
+            const labelData = await api.labelList();
+            mergeRemoteLabels(labelData.labels || []);
+            await db.putLabels(Object.values(state.labels), 40).catch(() => {});
+            await db.setMeta('cloudLabelsRevision', String(meta.labelsRevision)).catch(() => {});
+          } catch (err) {
+            console.warn('[cloud] 標籤同步失敗', err);
+            labelsChanged = false;
+          }
         }
         pipeline.setProducts(state.products);
         pipeline.setLabels(state.labels);
         matcher.setProducts(state.products);
         matcher.setManualLabelIds(manualLabelIdSet());
-        showStatus('cloudStatus', `已連線雲端：${state.products.length.toLocaleString()} 個商品（本機快取）、${Object.keys(state.labels).length} 個標籤`);
+        showStatus('cloudStatus', `已連線雲端：${state.products.length.toLocaleString()} 個商品（本機快取）、${Object.keys(state.labels).length} 個標籤`
+          + `${labelsChanged ? '（已更新）' : ''}`);
         return true;
       }
     }
@@ -540,7 +552,10 @@ async function loadCloudData() {
       }
     }
 
-    if (data && data.revision) await db.setMeta('cloudRevision', data.revision).catch(() => {});
+    if (data) {
+      if (data.productsRevision != null) await db.setMeta('cloudProductsRevision', String(data.productsRevision)).catch(() => {});
+      if (data.labelsRevision != null) await db.setMeta('cloudLabelsRevision', String(data.labelsRevision)).catch(() => {});
+    }
     const base = hasRemote
       ? `已連線雲端：${state.products.length.toLocaleString()} 個商品、${Object.keys(state.labels).length} 個標籤`
       : '已連線雲端；雲端目前沒有資料，可同步本機資料';
@@ -655,7 +670,10 @@ async function syncAllToCloud() {
 
     try {
       const latest = await api.meta();
-      if (latest && latest.revision) await db.setMeta('cloudRevision', latest.revision);
+      if (latest) {
+        if (latest.productsRevision != null) await db.setMeta('cloudProductsRevision', String(latest.productsRevision));
+        if (latest.labelsRevision != null) await db.setMeta('cloudLabelsRevision', String(latest.labelsRevision));
+      }
     } catch { /* 記不到 revision 只會讓下次多抓一次 bootstrap */ }
 
     const parts = [`商品 ${changed.length ? `已同步 ${changed.length.toLocaleString()} 筆` : '已是最新（無變動）'}`];
@@ -734,7 +752,10 @@ async function importExcel(file) {
     await syncMatchMetadata();
     try {
       const latest = await api.meta();
-      if (latest && latest.revision) await db.setMeta('cloudRevision', latest.revision);
+      if (latest) {
+        if (latest.productsRevision != null) await db.setMeta('cloudProductsRevision', String(latest.productsRevision));
+        if (latest.labelsRevision != null) await db.setMeta('cloudLabelsRevision', String(latest.labelsRevision));
+      }
     } catch { /* ignore */ }
   }
   showStatus('excelStatus', `成功載入 ${products.length} 個商品；已重新檢查 ${total} 個標籤，人工配對會保留`);

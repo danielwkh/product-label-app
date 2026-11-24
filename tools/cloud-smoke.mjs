@@ -48,7 +48,8 @@ const remoteLabels = [
 ];
 
 const calls = { bootstrap: 0, meta: 0, labelList: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0 };
-let revision = '1.1';
+let productsRevision = '1';
+let labelsRevision = '1';
 let bootstrapDelay = 0;
 let failBootstrap = false;
 
@@ -63,7 +64,7 @@ globalThis.fetch = async (url, options = {}) => {
   if (target.includes('/api/meta')) {
     calls.meta++;
     if (failBootstrap) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
-    return json({ cloud: true, productsRevision: '1', labelsRevision: '1', revision });
+    return json({ cloud: true, productsRevision, labelsRevision, revision: `${productsRevision}.${labelsRevision}` });
   }
   if (target.includes('/api/labels') && (!options.method || options.method === 'GET')) {
     calls.labelList++;
@@ -74,7 +75,10 @@ globalThis.fetch = async (url, options = {}) => {
     calls.bootstrap++;
     if (bootstrapDelay) await new Promise(r => setTimeout(r, bootstrapDelay));
     if (failBootstrap) return json({ error: 'D1 binding DB is not configured' }, 503);
-    return json({ products: remoteProducts, labels: remoteLabels, cloud: true, version: 2 });
+    return json({
+      products: remoteProducts, labels: remoteLabels, cloud: true, version: 2,
+      revision: `${productsRevision}.${labelsRevision}`, productsRevision, labelsRevision
+    });
   }
   if (target.includes('/api/products/bulk')) {
     calls.productsBulk++;
@@ -145,7 +149,8 @@ const bootstrapBefore = calls.bootstrap;
 await window.app.reloadCloud();
 await new Promise(r => setTimeout(r, 400));
 check('沒有再呼叫 bootstrap（0 次全表讀取）', calls.bootstrap === bootstrapBefore, `bootstrap=${calls.bootstrap - bootstrapBefore}`);
-check('改用便宜的 meta + labels', calls.meta > 0 && calls.labelList > 0);
+check('只呼叫便宜的 /api/meta（2 列）', calls.meta > 0 && calls.labelList === 0,
+  `meta ${calls.meta} 次、labels ${calls.labelList} 次（版本沒變就不用抓）`);
 check('狀態顯示已連線（使用本機快取）', /已連線雲端/.test(statusText()), statusText());
 
 /* --------------------------------------------- 情境 2：同步只送有變動的商品 */
@@ -168,7 +173,7 @@ check('改 1 筆商品只送 1 筆', calls.productsBulkRows === 1, `送了 ${cal
 /* ------------------------------------ 情境 3：本機快取寫入失敗不可影響雲端狀態 */
 
 console.log('\n=== 情境 3：本機離線快取寫入失敗 ===');
-revision = '3.1';                                            // 雲端有更新 → 走完整 bootstrap，才會寫本機快取
+productsRevision = '3';                                      // 商品版本有變 → 走完整 bootstrap，才會寫本機快取
 await db.setMeta('productsSignature', 'stale-on-purpose');   // 強制重新寫入本機快取
 window.app.state.localSnapshotWriter = () => { throw new Error('模擬 IndexedDB 逾時（60s）'); };
 await window.app.reloadCloud();
@@ -188,11 +193,21 @@ check('同步不會把 22,481 筆全部重送', calls.productsBulkRows <= 1, `�
 /* --------------------------------------- 情境 3b：revision 變了才重抓全量 */
 
 console.log('\n=== 情境 3b：雲端商品有變動時才重抓 ===');
-revision = '2.1';
+productsRevision = '2';
+labelsRevision = '2';
 const bootstrapBefore2 = calls.bootstrap;
 await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 1500));
+check('商品版本變動 → 重新 bootstrap 一次', calls.bootstrap === bootstrapBefore2 + 1, `bootstrap=${calls.bootstrap - bootstrapBefore2}`);
+
+/* 只有標籤變動時，不應該重抓 22,481 列商品 */
+labelsRevision = '3';
+const bootstrapBefore3 = calls.bootstrap;
+const labelCallsBefore = calls.labelList;
+await window.app.reloadCloud();
 await new Promise(r => setTimeout(r, 800));
-check('revision 變動 → 重新 bootstrap 一次', calls.bootstrap === bootstrapBefore2 + 1, `bootstrap=${calls.bootstrap - bootstrapBefore2}`);
+check('只有標籤版本變動 → 完全不重抓商品', calls.bootstrap === bootstrapBefore3, `bootstrap=${calls.bootstrap - bootstrapBefore3}`);
+check('只有標籤版本變動 → 只補抓標籤', calls.labelList > labelCallsBefore, `labels +${calls.labelList - labelCallsBefore}`);
 
 /* ------------------------------------------ 情境 4：真的連不上時訊息要正確 */
 
