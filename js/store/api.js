@@ -81,6 +81,8 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       form.append('hash', label.hash || '');
       form.append('size', String(label.size || (file && file.size) || 0));
       form.append('filename', label.filename || 'label.pdf');
+      form.append('mime', label.mime || 'application/pdf');
+      form.append('ext', label.ext || 'pdf');
       form.append('nameFromFile', label.nameFromFile || label.filename || '');
       form.append('productId', label.productId == null ? '' : String(label.productId));
       form.append('matchedProductName', label.matchedProductName || '');

@@ -375,7 +375,7 @@ async function runPipelineImport({ files, catalog, uploader, config = {}, storeE
   pipeline.initUploadQueue(createTaskQueue);
   pipeline.setProducts(catalog);
   pipeline.setLabels(labels || {});
-  pipeline.intake(files);
+  await pipeline.intake(files);
   await pipeline.decideStorageMode();
   const started = performance.now();
   await pipeline.start();
@@ -479,7 +479,7 @@ async function runPipelineImport({ files, catalog, uploader, config = {}, storeE
   pipeline.initUploadQueue(createTaskQueue);
   pipeline.setProducts(catalog);
   pipeline.setLabels({});
-  pipeline.intake(files);
+  await pipeline.intake(files);
   const running = pipeline.start();
   await sleep(45);
   pipeline.pause();
@@ -557,7 +557,7 @@ async function runPipelineImport({ files, catalog, uploader, config = {}, storeE
   pipeline.initUploadQueue(createTaskQueue);
   pipeline.setProducts(catalog);
   pipeline.setLabels({});
-  pipeline.intake(files);
+  await pipeline.intake(files);
   await pipeline.decideStorageMode();
   await pipeline.start();
   await pipeline.waitUploads();

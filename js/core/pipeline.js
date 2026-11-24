@@ -17,6 +17,8 @@
  *  - 同一個 PDF（內容 hash + 檔名）只會被儲存、上傳一次。
  */
 
+import { sniffFile, extFromName, stripExtension } from './filetype.js';
+
 export const STATUS = {
   PENDING: 'pending',
   HASHING: 'hashing',
@@ -56,6 +58,9 @@ export function makeJob(file, index) {
     status: STATUS.PENDING,
     storage: 'local',
     matched: false,
+    kind: 'pdf',
+    mime: 'application/pdf',
+    ext: 'pdf',
     uploaded: false,
     attempts: 0,
     uploadAttempts: 0,
@@ -362,10 +367,18 @@ export function createImportPipeline(deps) {
 
     // 3. 本機儲存（blob 只寫一次）
     setStatus(job, STATUS.SAVING);
+    const kindInfo = job.kind ? { kind: job.kind, mime: job.mime, ext: job.ext } : await sniffFile(file);
+    job.kind = kindInfo.kind;
+    job.mime = kindInfo.mime;
+    job.ext = kindInfo.ext;
+
     const label = Object.assign({
       id: labelId,
       filename: file.name || job.name,
-      nameFromFile: (file.name || job.name).replace(/\.pdf$/i, ''),
+      nameFromFile: stripExtension(file.name || job.name),
+      kind: kindInfo.kind,
+      mime: kindInfo.mime,
+      ext: kindInfo.ext,
       hash,
       size: file.size || 0,
       uploadedAt: (existing && existing.uploadedAt) || new Date().toISOString(),
@@ -373,14 +386,22 @@ export function createImportPipeline(deps) {
     }, existing || {});
 
     label.filename = file.name || job.name;
-    label.nameFromFile = label.nameFromFile || (file.name || job.name).replace(/\.pdf$/i, '');
+    label.nameFromFile = label.nameFromFile || stripExtension(file.name || job.name);
+    label.kind = label.kind || kindInfo.kind;
+    label.mime = label.mime || kindInfo.mime;
+    label.ext = label.ext || kindInfo.ext;
     label.hash = hash;
     label.size = file.size || 0;
 
     const alreadyStored = existing && existing.hasLocalBlob && await store.hasBlob(hash);
     if (!alreadyStored && mode === 'local') {
       try {
-        await store.putBlob(hash, file);
+        await store.putBlob(hash, file, {
+          name: file.name || job.name,
+          mime: kindInfo.mime,
+          kind: kindInfo.kind,
+          ext: kindInfo.ext
+        });
         label.hasLocalBlob = true;
       } catch (err) {
         if (/quota|storage|space/i.test(String(err && (err.name + err.message)))) {
@@ -479,12 +500,21 @@ export function createImportPipeline(deps) {
       return uploadQueue;
     },
 
-    intake(fileList) {
-      const list = Array.from(fileList || []).filter(f => /\.pdf$/i.test(f.name || ''));
+    async intake(fileList) {
+      // 不再用副檔名過濾：改看檔頭（PDF 改名成 .wdfx 也能正確辨識）
+      const list = Array.from(fileList || []).filter(f => f && (f.size || 0) > 0);
       if (!list.length) return { added: 0, total: jobs.length };
       const base = jobs.length;
+      const kinds = new Map();
+      for (const file of list) kinds.set(file, await sniffFile(file));
       list.forEach((file, i) => {
         const job = makeJob(file, base + i);
+        const kindInfo = kinds.get(file);
+        if (kindInfo) {
+          job.kind = kindInfo.kind;
+          job.mime = kindInfo.mime;
+          job.ext = kindInfo.ext;
+        }
         // 同一個檔案被重複選取兩次：合併成一個 job
         const duplicate = jobs.find(j => j.id === job.id);
         if (duplicate) {

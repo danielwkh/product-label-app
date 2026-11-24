@@ -756,3 +756,52 @@ tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、�
 `api-integration` **32 / 32** ✅（新增改名與批次刪除 9 項）、`stress-test` T1–T12 ✅。
 
 `sw-v6.js` 版本由 `v9` → `v10`，確保手機拿到新的 `app.js`（舊快取不會卡住）。
+
+---
+
+## 14. 新增：支援 PDF 以外的檔案（.wdfx 等 WePrint 可讀格式）
+
+背景：使用者把 PDF 轉成 `.wdfx`（WePrint App 讀得到），但原本的選擇器
+`accept="application/pdf,.pdf"` 會讓這些檔案在 iPhone 上變成灰色不能選；
+即使選進來，`intake()` 也會用 `/\\.pdf$/` 把它們全部過濾掉。
+
+### 改法：改用「檔頭位元組」判斷格式，不再看副檔名
+
+新增 `js/core/filetype.js`：
+
+| 檔頭 | 判定 | 站內行為 |
+|---|---|---|
+| `%PDF-` | `kind: 'pdf'` | PDF.js 預覽（**改名成 .wdfx 的 PDF 也能預覽**）|
+| JPEG / PNG / GIF / WebP / HEIC / BMP / TIFF | `kind: 'image'` | 直接顯示圖片 |
+| `PK\x03\x04` / OLE / PostScript 等 | `kind: 'file'` | 保存、上傳、分享；不預覽 |
+| 其他（例如真正的二進位 .wdfx） | `kind: 'file'`，保留原 mime 與副檔名 | 保存、上傳、分享；不預覽 |
+
+### 具體變更
+
+1. **`index.html`**：`選擇多個 PDF` → `選擇多個檔案`，移除 `accept` 限制（iOS 才能選到 `.wdfx`）。
+2. **`js/core/pipeline.js`**
+   - `intake()` 改為 async：先讀每個檔案的檔頭再建立 job（174 個檔案約 30ms）。
+   - 不再用副檔名過濾；job / label 增加 `kind`、`mime`、`ext`。
+   - `nameFromFile` 改成去掉**任何**副檔名（原本只去 `.pdf`）。
+3. **`js/app.js`**
+   - 預覽分三路：PDF → PDF.js、圖片 → `<img>`、其他 → 「此格式無法在網站內預覽，請直接分享到 WePrint 或下載」。
+   - 分享／下載保留**原始檔名與 Content-Type**（WePrint 靠這兩者判斷格式）。
+   - 標籤列表顯示格式徽章（例如 `WDFX（不支援預覽）`、`PNG（可預覽）`）。
+4. **`functions/api/[[path]].js`**
+   - R2 物件 key 由 `labels/<id>.pdf` 改為 `labels/<id>.<ext>`，並存 `mime` 欄位（`ensureSchema` 會自動 `ALTER TABLE`）。
+   - 上傳改用真正的 Content-Type；下載回應帶回儲存的 mime，`?download=1` 時用 `attachment`。
+5. **`schema.sql` / `migrations/0004_label_mime.sql`**：新增 `mime TEXT DEFAULT 'application/pdf'`（純新增欄位）。
+
+### 測試
+
+`tools/filetype-smoke.mjs`（**24 / 24 通過**）：
+
+```
+1. 檔頭判斷：PDF 改名 .wdfx → pdf；PNG/JPEG → image；DOCX → file；未知二進位 → file（保留 .wdfx）
+2. 匯入流程：3 個檔案（.wdfx 的 PDF、PNG、真 .wdfx）全部收下，kind 正確，Blob 都寫入本機
+3. 站內預覽：圖片顯示 <img>；未知格式顯示「無法在網站內預覽」並提示可用 WePrint
+4. 上傳／分享：表單帶 mime=application/octet-stream、ext=wdfx、原始檔名；
+   分享出去的檔案名稱仍是 洗髮精 400ml.wdfx、type=application/pdf
+```
+
+回歸：`api-integration` 32/32 ✅、`ui-smoke` ✅（174 PDF）、`label-edit-smoke` 38/38 ✅、`stress-test` T1–T12 ✅。

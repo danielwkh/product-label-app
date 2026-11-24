@@ -8,7 +8,8 @@
     "test:ui": "node ui-smoke.mjs",
     "test:cloud": "node cloud-smoke.mjs",
     "test:api": "node api-integration.mjs",
-    "test:label": "node label-edit-smoke.mjs"
+    "test:label": "node label-edit-smoke.mjs",
+    "test:file": "node filetype-smoke.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",

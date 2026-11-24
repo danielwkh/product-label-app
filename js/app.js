@@ -25,6 +25,7 @@ import {
   barcodeMatchesTail
 } from './core/text.js';
 import { createJobsView, formatBytes } from './ui/jobs-view.js';
+import { labelKind, extFromName } from './core/filetype.js';
 
 const $ = id => document.getElementById(id);
 const api = createApi({ base: './api/' });
@@ -311,10 +312,10 @@ async function handlePdfSelection(fileList) {
   }
   // 1. 立即顯示總數（不等任何 I/O）
   const before = pipeline.summary();
-  const { added } = pipeline.intake(files);
+  const { added } = await pipeline.intake(files);
   const batchJobs = pipeline.getJobs().filter(j => j.status === STATUS.PENDING);
   void before;
-  showStatus('pdfStatus', `已選取 ${files.length} 個 PDF${added < files.length ? `（${files.length - added} 個重複略過）` : ''}，開始本機處理…`);
+  showStatus('pdfStatus', `已選取 ${files.length} 個檔案${added < files.length ? `（${files.length - added} 個重複略過）` : ''}，開始本機處理…`);
   jobsView.summary(pipeline.summary());
 
   if (pdfIntakeRunning) {
@@ -977,6 +978,9 @@ function renderMatchList() {
         ${manual ? '<span class="tag-warn">人工鎖定</span>' : ''}
         ${l.matchConfidence === 'review' ? '<span class="tag-warn">待確認</span>' : ''}
         ${l.hasLocalBlob ? '<span class="tag-offline">本機可離線</span>' : (l.uploaded ? '<span class="tag-offline">雲端</span>' : '')}
+        ${(() => { const kind = labelKind(l); const ext = (l.ext || extFromName(l.filename) || '').toUpperCase();
+          if (kind === 'pdf' || !ext) return '';
+          return `<span class="tag-warn">${escapeHtml(ext)}${kind === 'image' ? '（可預覽）' : '（不支援預覽）'}</span>`; })()}
         ${l.matchScore && !manual ? `<span>信心 ${l.matchScore}${l.matchGap != null ? ` · 差距 ${l.matchGap}` : ''}</span>` : ''}
       </div>
       ${dups.get(l.id) ? `<div><span class="tag-dup">重複 ×${dups.get(l.id)}</span></div>` : ''}
@@ -1163,8 +1167,14 @@ async function getLabelBlob(label) {
   return blob;
 }
 
-function asFile(blob, name) {
-  return new File([blob], name || 'label.pdf', { type: 'application/pdf' });
+function asFile(blob, name, type) {
+  return new File([blob], name || 'label.pdf', { type: type || 'application/pdf' });
+}
+
+function labelMime(label) {
+  if (label && label.mime) return label.mime;
+  const kind = label && label.kind ? label.kind : 'pdf';
+  return kind === 'pdf' ? 'application/pdf' : 'application/octet-stream';
 }
 
 function fallbackDownload(file) {
@@ -1187,7 +1197,7 @@ async function shareLabel(id) {
   }
   try {
     const blob = await getLabelBlob(label);
-    const file = asFile(blob, label.filename || 'label.pdf');
+    const file = asFile(blob, label.filename || `label.${label.ext || 'pdf'}`, labelMime(label));
     if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
       await navigator.share({ files: [file], title: label.nameFromFile || label.filename, text: '營養標籤' });
       toast('已開啟分享選單');
@@ -1255,6 +1265,28 @@ async function previewLabel(id) {
     $('previewTitle').textContent = label.nameFromFile || label.filename || '標籤預覽';
     $('previewStage').innerHTML = '<div class="preview-loading">準備預覽中…</div>';
     $('previewModal').classList.add('show');
+
+    const kind = labelKind(label);
+
+    if (kind === 'image') {
+      closePdfPreviewOnly();
+      $('previewStage').innerHTML = `<img src="${state.preview.url}" alt="${escapeHtml(label.nameFromFile || '')}"
+        style="max-width:100%;max-height:70dvh;object-fit:contain;border-radius:8px">`;
+      return;
+    }
+
+    if (kind !== 'pdf') {
+      // .wdfx 這類「WePrint 讀得到、但不是 PDF」的檔案：不在站內預覽，但可以直接分享或下載
+      closePdfPreviewOnly();
+      $('previewStage').innerHTML = `
+        <div class="preview-loading">
+          <div style="font-size:2rem">📄</div>
+          <p><strong>${escapeHtml((label.ext || '').toUpperCase() || '此格式')}</strong> 無法在網站內預覽。</p>
+          <p style="font-size:.82rem;color:#64748b">檔案已完整保存，可直接用下面的「分享到 WePrint」或「下載」使用。</p>
+        </div>`;
+      return;
+    }
+
     const pdfjs = await loadPdfJs();
     if (!pdfjs) {
       $('previewStage').innerHTML = '<div class="preview-loading">預覽元件載入失敗，請使用「在系統開啟」或下載。</div>';
@@ -1265,6 +1297,20 @@ async function previewLabel(id) {
   } catch (err) {
     toast(`無法取得標籤檔案：${err.message}`);
   }
+}
+
+// 只清掉 PDF.js 的部分（圖片／其他格式沒有 PDF 物件，但仍要清空預覽區）
+function closePdfPreviewOnly() {
+  if (state.preview.pdf) {
+    try { state.preview.pdf.destroy(); } catch { /* ignore */ }
+  }
+  state.preview.pdf = null;
+  const stage = $('previewStage');
+  if (stage) stage.innerHTML = '';
+  const pageInfo = $('pageInfo');
+  if (pageInfo) pageInfo.textContent = '—';
+  if ($('prevPageBtn')) $('prevPageBtn').disabled = true;
+  if ($('nextPageBtn')) $('nextPageBtn').disabled = true;
 }
 
 function closePreview() {
@@ -1671,7 +1717,7 @@ function bindEvents() {
     const label = state.labels[state.preview.labelId];
     if (!label) return;
     try {
-      fallbackDownload(asFile(await getLabelBlob(label), label.filename));
+      fallbackDownload(asFile(await getLabelBlob(label), label.filename, labelMime(label)));
     } catch (err) {
       toast(`無法下載：${err.message}`);
     }

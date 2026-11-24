@@ -26,8 +26,9 @@ CREATE TABLE IF NOT EXISTS labels (
   match_gap INTEGER,
   match_why TEXT,
   r2_key TEXT NOT NULL,
-  content_hash TEXT,          -- PDF 內容指紋（重複上傳時用來去重）
-  size INTEGER DEFAULT 0,     -- PDF 位元組數
+  content_hash TEXT,          -- 檔案內容指紋（重複上傳時用來去重）
+  size INTEGER DEFAULT 0,     -- 檔案位元組數
+  mime TEXT DEFAULT 'application/pdf',  -- 真正的 Content-Type（支援 PDF 以外的格式，例如 .wdfx）
   uploaded_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

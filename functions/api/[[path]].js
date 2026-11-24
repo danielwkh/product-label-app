@@ -108,6 +108,10 @@ async function ensureSchema(env) {
     if (!columns.has('size')) {
       await env.DB.prepare('ALTER TABLE labels ADD COLUMN size INTEGER DEFAULT 0').run();
     }
+    if (!columns.has('mime')) {
+      // 支援 PDF 以外的檔案（例如 WePrint 用的 .wdfx）：記錄真正的 Content-Type
+      await env.DB.prepare("ALTER TABLE labels ADD COLUMN mime TEXT DEFAULT 'application/pdf'").run();
+    }
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_content_hash ON labels(content_hash)').run();
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_uploaded ON labels(uploaded_at)').run();
     await ensureMetaTable(env);
@@ -186,7 +190,7 @@ export async function onRequestGet({ request, env, context }) {
     const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
         matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
         match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, uploaded_at AS uploadedAt, updated_at AS updatedAt
+        content_hash AS hash, size, mime, uploaded_at AS uploadedAt, updated_at AS updatedAt
       FROM labels ORDER BY uploaded_at`).all();
     return json({ labels: labels.results || [], cloud: true });
   }
@@ -223,7 +227,7 @@ export async function onRequestGet({ request, env, context }) {
     const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
         matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
         match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, uploaded_at AS uploadedAt, updated_at AS updatedAt
+        content_hash AS hash, size, mime, uploaded_at AS uploadedAt, updated_at AS updatedAt
       FROM labels ORDER BY uploaded_at`).all();
     const payload = {
       products: products.results || [],
@@ -252,14 +256,17 @@ export async function onRequestGet({ request, env, context }) {
     if (!env.LABELS) return json({ error: 'R2 binding LABELS is not configured' }, 503);
     const id = labelIdFromPath(url);
     if (!id) return json({ error: 'Label id is required' }, 400);
-    const row = await env.DB.prepare('SELECT r2_key, filename FROM labels WHERE id = ?').bind(id).first();
+    const row = await env.DB.prepare('SELECT r2_key, filename, mime FROM labels WHERE id = ?').bind(id).first();
     if (!row) return json({ error: 'Label not found' }, 404);
 
+    const storedMime = row.mime || 'application/pdf';
+    const wantsDownload = url.searchParams.get('download') === '1';
     const rangeHeader = request.headers.get('range');
     const headers = new Headers();
-    headers.set('content-type', 'application/pdf');
+    headers.set('content-type', storedMime);
     headers.set('accept-ranges', 'bytes');
-    headers.set('content-disposition', `inline; filename="${encodeURIComponent(row.filename)}"`);
+    headers.set('content-disposition',
+      `${wantsDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(row.filename || 'label')}`);
     headers.set('cache-control', 'private, max-age=3600');
 
     if (rangeHeader) {
@@ -417,7 +424,10 @@ export async function onRequestPost({ request, env }) {
 
     const hash = String(form.get('hash') || '');
     const size = Number(form.get('size') || file.size || 0);
-    const key = `labels/${id}.pdf`;
+    const originalName = String(form.get('filename') || file.name || '');
+    const ext = String(form.get('ext') || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase().slice(0, 8) || 'pdf';
+    const mime = String(form.get('mime') || file.type || 'application/pdf').slice(0, 120);
+    const key = `labels/${id}.${ext}`;
 
     // 同一個 id（= 內容 + 檔名 hash）且 R2 已有物件 → 不重寫
     const existing = await env.DB.prepare('SELECT id, content_hash, r2_key FROM labels WHERE id = ?').bind(id).first();
@@ -433,21 +443,21 @@ export async function onRequestPost({ request, env }) {
       // 直接傳 File（Blob）給 R2：表單解析後已有實際長度，
       // 比 file.stream() 更可靠（串流沒有固定長度時 R2 會拒絕）。
       await env.LABELS.put(key, file, {
-        httpMetadata: { contentType: 'application/pdf' },
-        customMetadata: { hash: hash || '', filename: String(form.get('filename') || file.name) }
+        httpMetadata: { contentType: mime },
+        customMetadata: { hash: hash || '', filename: originalName, ext, mime }
       });
     }
 
     const timestamp = now();
     const uploadedAt = String(form.get('uploadedAt') || timestamp);
     await env.DB.prepare(`INSERT INTO labels (id, filename, name_from_file, product_id, matched_product_name, match_source,
-        match_score, match_confidence, match_gap, match_why, r2_key, content_hash, size, uploaded_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        match_score, match_confidence, match_gap, match_why, r2_key, content_hash, size, mime, uploaded_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET filename=excluded.filename, name_from_file=excluded.name_from_file,
         product_id=excluded.product_id, matched_product_name=excluded.matched_product_name, match_source=excluded.match_source,
         match_score=excluded.match_score, match_confidence=excluded.match_confidence, match_gap=excluded.match_gap,
         match_why=excluded.match_why, r2_key=excluded.r2_key, content_hash=excluded.content_hash,
-        size=excluded.size, updated_at=excluded.updated_at`).bind(
+        size=excluded.size, mime=excluded.mime, updated_at=excluded.updated_at`).bind(
       id,
       String(form.get('filename') || file.name),
       String(form.get('nameFromFile') || file.name),
@@ -461,6 +471,7 @@ export async function onRequestPost({ request, env }) {
       key,
       hash || null,
       size,
+      mime,
       uploadedAt,
       timestamp
     ).run();
