@@ -402,6 +402,81 @@ check('取消延後可以還原', await (async () => {
   return state.labels['d-unmatched-2'].deferred === false;
 })());
 
+/* ------------------------------- 12. Excel 增量匯入（先比對、只送變更） */
+console.log('\n=== 12. Excel 比對（增量匯入） ===');
+
+const cur = [
+  { id: 1, name: '可樂 330ml', barcode: '111', barcode2: '', labelId: null },
+  { id: 2, name: '雪碧 330ml', barcode: '222', barcode2: '', labelId: 'L-2' },
+  { id: 3, name: '停售商品 A', barcode: '333', barcode2: '', labelId: 'L-3' }
+];
+const incoming = [
+  { id: 1, name: '可樂 330ml', barcode: '111', barcode2: '' },            // 未變
+  { id: 2, name: '雪碧 330ml 新包裝', barcode: '222', barcode2: '' },      // 修改
+  { id: 4, name: '新商品 B', barcode: '444', barcode2: '' }                // 新增
+];
+const d = window.app.diffProducts(incoming, cur);
+check('比對：新增 1 筆', d.added.length === 1 && d.added[0].id === 4, JSON.stringify(d.added.map(p => p.id)));
+check('比對：修改 1 筆', d.changed.length === 1 && d.changed[0].after.name.includes('新包裝'), JSON.stringify(d.changed.map(c => c.after.name)));
+check('比對：刪除 1 筆（Excel 已沒有）', d.removed.length === 1 && d.removed[0].id === 3, JSON.stringify(d.removed.map(p => p.id)));
+check('比對：未變 1 筆', d.unchanged.length === 1 && d.unchanged[0].id === 1, String(d.unchanged.length));
+check('完全相同的清單不會產生任何變更', (() => {
+  const same = window.app.diffProducts(cur, cur);
+  return same.added.length === 0 && same.changed.length === 0 && same.removed.length === 0;
+})());
+
+// 改名（同條碼）要沿用舊 id，不能被當成「刪除 + 新增」
+const renamed = window.app.buildProductsFromRows(
+  [{ 名稱: '雪碧 330ml（改名）', 條碼: '222' }],
+  { nameCol: '名稱', barcodeCol: '條碼', barcode2Col: undefined },
+  cur
+);
+check('同條碼改名 → 沿用舊 id（不會變成刪除+新增）', renamed.length === 1 && renamed[0].id === 2, JSON.stringify(renamed));
+const dRenamed = window.app.diffProducts(renamed, cur);
+check('改名只算「修改」，不算刪除', dRenamed.changed.length === 1 && dRenamed.added.length === 0, JSON.stringify({
+  changed: dRenamed.changed.length, added: dRenamed.added.length, removed: dRenamed.removed.length
+}));
+
+// 確認視窗：有變動時顯示四種數字 + 刪除勾選
+window.app.openExcelDiffModal({ fileName: '商品.xlsx', incomingCount: 3, diff: d, apply: async () => {} });
+const modal = document.getElementById('excelDiffModal');
+check('比對視窗會打開', modal.classList.contains('show'));
+check('視窗列出新增/修改/刪除/未變數字', /新增 1/.test(document.getElementById('excelDiffCounts').textContent)
+  && /修改 1/.test(document.getElementById('excelDiffCounts').textContent)
+  && /刪除 1/.test(document.getElementById('excelDiffCounts').textContent)
+  && /未變 1/.test(document.getElementById('excelDiffCounts').textContent),
+  document.getElementById('excelDiffCounts').textContent.trim());
+check('視窗顯示刪除項目與「有配對標籤」警示', /停售商品 A/.test(document.getElementById('excelDiffRows').textContent)
+  && /有配對標籤/.test(document.getElementById('excelDiffRows').textContent),
+  document.getElementById('excelDiffRows').textContent.slice(0, 80));
+check('刪除選項預設勾選', document.getElementById('excelDiffDelete').checked === true
+  && document.getElementById('excelDiffDeleteWrap').hidden === false);
+check('按鈕只提「套用 N 筆變更」，不是全部重傳', /套用 2 筆變更/.test(document.getElementById('excelDiffConfirm').textContent),
+  document.getElementById('excelDiffConfirm').textContent);
+check('有配對標籤的刪除會標示出來', /其中 1 個有配對標籤/.test(document.getElementById('excelDiffDeleteText').textContent),
+  document.getElementById('excelDiffDeleteText').textContent);
+
+// 取消 → 完全不做任何事
+let applied = null;
+window.app.openExcelDiffModal({ fileName: '商品.xlsx', incomingCount: 3, diff: d, apply: async o => { applied = o; } });
+document.getElementById('excelDiffCancel').dispatchEvent(new window.Event('click'));
+await wait(50);
+check('按取消不會套用', applied === null && !document.getElementById('excelDiffModal').classList.contains('show'));
+
+// 確認 → 只把 deleteRemoved 傳給套用函式
+window.app.openExcelDiffModal({ fileName: '商品.xlsx', incomingCount: 3, diff: d, apply: async o => { applied = o; } });
+document.getElementById('excelDiffDelete').checked = false;
+document.getElementById('excelDiffConfirm').dispatchEvent(new window.Event('click'));
+await wait(120);
+check('取消勾選時 → 保留那些商品', applied && applied.deleteRemoved === false, JSON.stringify(applied));
+
+// 沒有差異的檔案
+const sameDiff = window.app.diffProducts(cur, cur);
+window.app.openExcelDiffModal({ fileName: '一樣.xlsx', incomingCount: 3, diff: sameDiff, apply: async () => {} });
+check('沒有差異時不顯示刪除選項', document.getElementById('excelDiffDeleteWrap').hidden === true);
+check('沒有差異時按鈕只說「知道了」', document.getElementById('excelDiffConfirm').textContent === '知道了',
+  document.getElementById('excelDiffConfirm').textContent);
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

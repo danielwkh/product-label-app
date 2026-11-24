@@ -9,16 +9,19 @@
     "test:cloud": "node cloud-smoke.mjs",
     "test:api": "node api-integration.mjs",
     "test:label": "node label-edit-smoke.mjs",
-    "test:file": "node filetype-smoke.mjs"
+    "test:file": "node filetype-smoke.mjs",
+    "test:excel": "node excel-diff-smoke.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",
     "jsdom": "^26.0.0",
-    "miniflare": "^3.2025000.0"
+    "miniflare": "^3.2025000.0",
+    "xlsx": "^0.18.5"
   },
   "dependencies": {
     "jsdom": "^29.1.1",
     "miniflare": "^3.20250718.3",
-    "wrangler": "^4.165.0"
+    "wrangler": "^4.165.0",
+    "xlsx": "^0.18.5"
   }
 }

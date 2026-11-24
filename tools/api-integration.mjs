@@ -271,6 +271,39 @@ const afterDelete = await db.prepare('SELECT COUNT(*) AS n FROM labels').first()
 const r2After = await r2.list({ prefix: 'labels/' });
 check('刪除後 D1 與 R2 都少一筆', afterDelete.n === 171 && r2After.objects.length === 171, `D1 ${afterDelete.n} / R2 ${r2After.objects.length}`);
 
+/* ------------------------------- 9c. 刪除指定商品（Excel 增量匯入用） */
+console.log('\n=== 9c. 刪除指定商品（增量匯入） ===');
+const beforeProducts = await db.prepare('SELECT COUNT(*) AS n FROM products').first();
+const victim = await db.prepare('SELECT id, name FROM products LIMIT 1').first();
+const victimLabel = uploaded.find(l => l.productId == null) || uploaded[0];
+await db.prepare('UPDATE labels SET product_id = ?, matched_product_name = ?, match_source = ? WHERE id = ?')
+  .bind(victim.id, victim.name, 'manual', victimLabel.id).run();
+await db.prepare('UPDATE products SET label_id = ? WHERE id = ?').bind(victimLabel.id, victim.id).run();
+
+const delNone = await api.onRequestPost({ request: request('/api/products/delete', { method: 'POST', ...json({}) }), env });
+check('沒有 ids → 400', delNone.status === 400, String(delNone.status));
+
+const delTooMany = await api.onRequestPost({
+  request: request('/api/products/delete', { method: 'POST', ...json({ ids: Array.from({ length: 301 }, (_, i) => i + 1) }) }),
+  env
+});
+check('一次超過 300 筆 → 400（要求分批）', delTooMany.status === 400, String(delTooMany.status));
+
+const delOk = await api.onRequestPost({
+  request: request('/api/products/delete', { method: 'POST', ...json({ ids: [victim.id] }) }),
+  env
+});
+const delBody = await delOk.json();
+check('刪除 1 個商品 → 回報 1 筆', delBody.ok === true && delBody.deletedProducts === 1, JSON.stringify(delBody));
+check('指向被刪商品的標籤會解除配對', delBody.unlinkedLabels === 1, JSON.stringify(delBody));
+const afterProducts = await db.prepare('SELECT COUNT(*) AS n FROM products').first();
+check('商品總數少 1', afterProducts.n === beforeProducts.n - 1, `${beforeProducts.n} → ${afterProducts.n}`);
+const orphanLabel = await db.prepare('SELECT product_id AS pid, matched_product_name AS name, match_source AS src FROM labels WHERE id = ?').bind(victimLabel.id).first();
+check('該標籤變成未配對（但檔案還在）', orphanLabel.pid === null && orphanLabel.name === null && orphanLabel.src === null,
+  JSON.stringify(orphanLabel));
+const stillThere = await db.prepare('SELECT COUNT(*) AS n FROM labels WHERE id = ?').bind(victimLabel.id).first();
+check('標籤本身沒有被刪除', stillThere.n === 1, String(stillThere.n));
+
 console.log('\n=== 9b. 清除雲端資料 ===');
 const clearWrong = await (await api.onRequestPost({
   request: request('/api/cloud/clear', json({ scope: 'labels', confirm: '清' })), env

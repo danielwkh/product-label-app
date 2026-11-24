@@ -339,6 +339,35 @@ export async function onRequestPost({ request, env }) {
     return json({ ok: true, count: written, mode: replace ? 'replace' : 'merge' });
   }
 
+  /* 刪除指定商品（Excel 增量匯入：只送「已從 Excel 移除」的那幾筆） */
+  if (url.pathname.endsWith('/api/products/delete')) {
+    await ensureSchema(env);
+    const body = await readJson(request);
+    const raw = body && Array.isArray(body.ids) ? body.ids : null;
+    if (!raw) return json({ error: 'ids array is required' }, 400);
+    const ids = raw.map(Number).filter(n => Number.isFinite(n));
+    if (!ids.length) return json({ error: 'ids array is required' }, 400);
+    if (ids.length > 300) return json({ error: 'too many ids in one request (max 300)' }, 400);
+
+    const timestamp = now();
+    let deletedProducts = 0;
+    let unlinkedLabels = 0;
+    for (const group of chunk(ids, 100)) {
+      const placeholders = group.map(() => '?').join(',');
+      const res = await env.DB.prepare(`DELETE FROM products WHERE id IN (${placeholders})`).bind(...group).run();
+      deletedProducts += (res.meta && res.meta.changes) || 0;
+      const unlink = await env.DB.prepare(`UPDATE labels SET product_id=NULL, matched_product_name=NULL,
+          match_source=NULL, match_score=NULL, match_confidence=NULL, match_gap=NULL, match_why=NULL, updated_at=?
+        WHERE product_id IN (${placeholders})`).bind(timestamp, ...group).run();
+      unlinkedLabels += (unlink.meta && unlink.meta.changes) || 0;
+    }
+    if (deletedProducts || unlinkedLabels) {
+      await bumpRevision(env, 'products_revision');
+    }
+    if (unlinkedLabels) await bumpRevision(env, 'labels_revision');
+    return json({ ok: true, deletedProducts, unlinkedLabels });
+  }
+
   /* 批次更新配對結果 */
   if (url.pathname.endsWith('/api/labels/sync')) {
     const body = await readJson(request);

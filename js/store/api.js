@@ -73,6 +73,16 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       });
     },
 
+    /** 刪除指定商品（Excel 增量匯入用）。伺服器會同時解除指向這些商品的標籤配對。 */
+    async productsDelete(ids) {
+      return request('products/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids }),
+        timeoutMs: 60000
+      });
+    },
+
     /** 上傳單一 PDF。id 由內容 hash 產生，因此重試不會產生重複資料。 */
     async uploadLabel(label, file, { timeoutMs = 180000 } = {}) {
       const form = new FormData();

@@ -690,8 +690,92 @@ async function syncAllToCloud() {
 
 /* ------------------------------------------------------------- Excel 匯入 */
 
-function findCol(headers, cands) {
-  return headers.find(h => cands.some(c => normalize(h).includes(normalize(c)) || normalize(c).includes(normalize(h))));
+function findCol(headers, cands, exclude = []) {
+  const pool = headers.filter(h => !exclude.includes(h));
+  const norm = h => normalize(h);
+  for (const c of cands) {
+    const hit = pool.find(h => norm(h) === norm(c));
+    if (hit) return hit;
+  }
+  for (const c of cands) {
+    const hit = pool.find(h => norm(h).includes(norm(c)));
+    if (hit) return hit;
+  }
+  for (const c of cands) {
+    const hit = pool.find(h => norm(h).length >= 2 && norm(c).includes(norm(h)));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** 商品身分比對：先看條碼（改名也認得），再看正規化名稱。 */
+function indexProductKeys(products) {
+  const byBarcode = new Map();
+  const byName = new Map();
+  for (const p of products) {
+    const barcode = String(p.barcode || '').trim();
+    if (barcode && !byBarcode.has(barcode)) byBarcode.set(barcode, p);
+    const key = normalize(p.name);
+    if (key && !byName.has(key)) byName.set(key, p);
+  }
+  return { byBarcode, byName };
+}
+
+/** 把 Excel 的列轉成商品陣列，盡量沿用舊 id（避免每次上傳都改寫別名/配對）。 */
+function buildProductsFromRows(rows, cols, oldProducts) {
+  const { byBarcode, byName } = indexProductKeys(oldProducts);
+  let nextId = oldProducts.reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
+  const products = [];
+  const usedIds = new Set();
+  for (const row of rows) {
+    const name = String(row[cols.nameCol] || '').trim();
+    if (!name) continue;
+    const barcode = String(row[cols.barcodeCol] || '').trim();
+    const barcode2 = String(row[cols.barcode2Col] || '').trim();
+    const old = (barcode && byBarcode.get(barcode)) || byName.get(normalize(name)) || null;
+    let id = old ? old.id : nextId++;
+    while (usedIds.has(id)) id = nextId++;
+    usedIds.add(id);
+    products.push({
+      id,
+      name,
+      barcode,
+      barcode2,
+      labelId: old ? old.labelId || null : null
+    });
+  }
+  return products;
+}
+
+/** 比對新舊商品清單：新增 / 修改 / 刪除 / 未變。 */
+function diffProducts(incoming, current) {
+  const curById = new Map((current || []).map(p => [p.id, p]));
+  const incomingIds = new Set(incoming.map(p => p.id));
+  const added = [];
+  const changed = [];
+  const unchanged = [];
+  for (const p of incoming) {
+    const old = curById.get(p.id);
+    if (!old) { added.push(p); continue; }
+    const differs = String(old.name) !== String(p.name)
+      || String(old.barcode || '') !== String(p.barcode || '')
+      || String(old.barcode2 || '') !== String(p.barcode2 || '');
+    if (differs) changed.push({ before: old, after: p });
+    else unchanged.push(p);
+  }
+  const removed = (current || []).filter(p => !incomingIds.has(p.id));
+  return { added, changed, removed, unchanged };
+}
+
+function excelDiffSummary(diff) {
+  return {
+    added: diff.added.length,
+    changed: diff.changed.length,
+    removed: diff.removed.length,
+    unchanged: diff.unchanged.length,
+    changedTotal: diff.added.length + diff.changed.length,
+    linkedRemoved: diff.removed.filter(p => p.labelId).length
+  };
 }
 
 async function importExcel(file) {
@@ -703,50 +787,97 @@ async function importExcel(file) {
 
   const headers = Object.keys(rows[0]);
   const nameCol = findCol(headers, ['名稱', '商品名稱', '品名', 'name', 'product']);
-  const barcodeCol = findCol(headers, ['條碼', 'barcode', 'bar code', '主條碼']);
-  const barcode2Col = findCol(headers, ['第二條碼', '副條碼', 'barcode2', 'second', 'barcode 2']);
+  const barcodeCol = findCol(headers, ['條碼', 'barcode', 'bar code', '主條碼'], [nameCol].filter(Boolean));
+  const barcode2Col = findCol(headers, ['第二條碼', '副條碼', 'barcode2', '第二個條碼', 'second', 'bar code 2'],
+    [nameCol, barcodeCol].filter(Boolean));
   if (!nameCol) throw new Error('找不到「名稱」欄位');
 
-  // 用「正規化名稱」保留舊 id 與既有配對，避免每次上傳 Excel 都改寫商品 id
-  const oldByName = new Map(state.products.map(p => [normalize(p.name), p]));
-  let nextId = state.products.reduce((max, p) => Math.max(max, Number(p.id) || 0), 0) + 1;
+  const products = buildProductsFromRows(rows, { nameCol, barcodeCol, barcode2Col }, state.products);
+  if (!products.length) throw new Error('Excel 沒有可用的商品名稱');
+  const diff = diffProducts(products, state.products);
 
-  const products = [];
-  for (const row of rows) {
-    const name = String(row[nameCol] || '').trim();
-    if (!name) continue;
-    const old = oldByName.get(normalize(name));
-    products.push({
-      id: old ? old.id : nextId++,
-      name,
-      barcode: String(row[barcodeCol] || '').trim(),
-      barcode2: String(row[barcode2Col] || '').trim(),
-      labelId: old ? old.labelId || null : null
-    });
-  }
-  state.products = products;
-  await db.replaceProducts(products);
-  pipeline.setProducts(products);
-  matcher.setProducts(products);
-  updateStats();
-  showStatus('excelStatus', `已載入 ${products.length} 個商品，正在重新配對標籤…`);
-
-  // 重新配對（在 worker 內分批執行，UI 不會凍結）
-  const total = Object.values(state.labels).length;
-  await pipeline.rematchAll({
-    onProgress: (done, all) => {
-      if (done === all || done % 40 === 0) showStatus('excelStatus', `重新配對中：${done} / ${all}`);
-    }
+  // 先比對、先讓使用者確認，才真的寫入（也不再整份重傳 2 萬多筆）
+  openExcelDiffModal({
+    fileName: file.name,
+    incomingCount: products.length,
+    diff,
+    apply: options => applyExcelDiff(products, diff, options)
   });
-  await refreshStateFromPipeline();
+  hideStatus('excelStatus');
+}
+
+async function applyExcelDiff(products, diff, options = {}) {
+  const deleteRemoved = options.deleteRemoved !== false && diff.removed.length > 0;
+  const summary = excelDiffSummary(diff);
+  const status = text => showStatus('excelStatus', text);
+
+  // 1) 本機：只寫有變動的（新增 + 修改），刪除的只刪真正要刪的
+  const touched = [...diff.added, ...diff.changed.map(c => c.after)];
+  if (touched.length) {
+    status(`寫入本機：${touched.length} 筆變更…`);
+    await db.putProducts(touched, 500);
+  }
+  if (deleteRemoved && diff.removed.length) {
+    await db.deleteProducts(diff.removed.map(p => p.id));
+    const removedIds = new Set(diff.removed.map(p => p.id));
+    state.products = state.products.filter(p => !removedIds.has(p.id));
+    for (const label of Object.values(state.labels)) {
+      if (label.productId != null && removedIds.has(label.productId)) {
+        label.productId = null;
+        label.matchedProductName = null;
+        label.matchSource = null;
+        label.matchScore = null;
+        label.matchConfidence = null;
+        label.matchGap = null;
+        label.matchWhy = null;
+      }
+    }
+  }
+
+  // 不刪除時，把「Excel 已沒有」的商品保留在清單裡（雲端也還在，才不會下次又被拉回來）
+  state.products = deleteRemoved ? products : products.concat(diff.removed);
+
+  pipeline.setProducts(state.products);
+  matcher.setProducts(state.products);
+  matcher.setManualLabelIds(manualLabelIdSet());
+  updateStats();
+
+  // 2) 重新配對（有變動才做；人工配對會保留）
+  if (summary.changedTotal || (deleteRemoved && diff.removed.length)) {
+    pipeline.setLabels(state.labels);
+    const total = Object.values(state.labels).length;
+    await pipeline.rematchAll({
+      onProgress: (done, all) => {
+        if (done === all || done % 40 === 0) status(`重新配對中：${done} / ${all}`);
+      }
+    });
+    await refreshStateFromPipeline();
+    const totalText = total;
+    status(`已套用：新增 ${summary.added}、修改 ${summary.changed}、刪除 ${deleteRemoved ? summary.removed : `0（保留 ${summary.removed}）`}；重新檢查 ${totalText} 個標籤`);
+  }
+
+  // 3) 雲端：只送有變動的商品（新增 + 修改），以及要刪除的那幾筆
   if (state.cloudEnabled) {
-    const list = products.map(p => ({ id: p.id, name: p.name, barcode: p.barcode, barcode2: p.barcode2, labelId: p.labelId || null }));
+    const list = touched.map(p => ({
+      id: p.id, name: p.name, barcode: p.barcode, barcode2: p.barcode2, labelId: p.labelId || null
+    }));
     for (let i = 0; i < list.length; i += 200) {
       try {
         await api.productsBulk(list.slice(i, i + 200), { replace: false });
       } catch (err) {
-        showStatus('excelStatus', `商品已存本機，雲端同步失敗：${err.message}`, 'error');
+        status(`本機已更新，雲端商品同步失敗：${err.message}`, 'error');
         return;
+      }
+    }
+    if (deleteRemoved && diff.removed.length) {
+      const ids = diff.removed.map(p => p.id);
+      for (let i = 0; i < ids.length; i += 250) {
+        try {
+          await api.productsDelete(ids.slice(i, i + 250));
+        } catch (err) {
+          status(`本機已更新，雲端刪除失敗：${err.message}`, 'error');
+          return;
+        }
       }
     }
     await syncMatchMetadata();
@@ -758,10 +889,95 @@ async function importExcel(file) {
       }
     } catch { /* ignore */ }
   }
-  showStatus('excelStatus', `成功載入 ${products.length} 個商品；已重新檢查 ${total} 個標籤，人工配對會保留`);
-  toast('Excel 上傳成功');
+
+  status(`Excel 已套用：新增 ${summary.added}、修改 ${summary.changed}、刪除 ${deleteRemoved ? summary.removed : `0（保留 ${summary.removed}）`}、未變 ${summary.unchanged}`);
+  toast(touched.length || diff.removed.length
+    ? `已套用 ${summary.changedTotal} 筆變更${deleteRemoved && summary.removed ? `、刪除 ${summary.removed}` : ''}`
+    : '商品清單沒有變動');
 }
 
+/* ------------------------------------------------- Excel 比對結果（確認視窗） */
+
+function showExcelDiffRows(diff) {
+  const rowsOf = (list, toText) => list.slice(0, 50).map(toText).map(t => `<li>${escapeHtml(t)}</li>`).join('');
+  const blocks = [];
+  if (diff.added.length) {
+    blocks.push(`<div><strong>➕ 新增 ${diff.added.length} 個</strong><ul>${rowsOf(diff.added, p => `${p.name}${p.barcode ? `（${p.barcode}）` : ''}`)}</ul></div>`);
+  }
+  if (diff.changed.length) {
+    blocks.push(`<div><strong>✏️ 修改 ${diff.changed.length} 個</strong><ul>${rowsOf(diff.changed, c => `${c.before.name} → ${c.after.name}${String(c.before.barcode || '') !== String(c.after.barcode || '') ? `（條碼 ${c.before.barcode || '空'} → ${c.after.barcode || '空'}）` : ''}`)}</ul></div>`);
+  }
+  if (diff.removed.length) {
+    blocks.push(`<div><strong>➖ 刪除 ${diff.removed.length} 個（Excel 已沒有）</strong><ul>${rowsOf(diff.removed, p => `${p.name}${p.labelId ? ' ⚠️ 有配對標籤' : ''}`)}</ul></div>`);
+  }
+  return blocks.join('') || '<div>完全沒有差異。</div>';
+}
+
+function openExcelDiffModal({ fileName, incomingCount, diff, apply }) {
+  const modal = $('excelDiffModal');
+  if (!modal) return;
+  const s = excelDiffSummary(diff);
+  const hasChange = s.changedTotal > 0 || s.removed > 0;
+  $('excelDiffFile').textContent = `${fileName} · ${incomingCount.toLocaleString()} 列`;
+  $('excelDiffCounts').innerHTML = `
+    <span class="diff-chip add">➕ 新增 ${s.added}</span>
+    <span class="diff-chip mod">✏️ 修改 ${s.changed}</span>
+    <span class="diff-chip del">➖ 刪除 ${s.removed}</span>
+    <span class="diff-chip same">＝ 未變 ${s.unchanged.toLocaleString()}</span>`;
+  $('excelDiffRows').innerHTML = hasChange ? showExcelDiffRows(diff) : '<div>與目前資料完全相同，不需要同步。</div>';
+  $('excelDiffRows').hidden = !hasChange;
+
+  const deleteWrap = $('excelDiffDeleteWrap');
+  const deleteBox = $('excelDiffDelete');
+  if (s.removed > 0) {
+    deleteWrap.hidden = false;
+    deleteBox.checked = true;
+    $('excelDiffDeleteText').innerHTML = `同時把雲端已不存在的 <strong>${s.removed}</strong> 個商品刪除`
+      + (s.linkedRemoved ? `<br><span class="warn-text">⚠️ 其中 ${s.linkedRemoved} 個有配對標籤 → 這些標籤會變成「未配對」（檔案不會刪除）</span>` : '');
+  } else {
+    deleteWrap.hidden = true;
+    deleteBox.checked = false;
+  }
+
+  $('excelDiffNote').textContent = hasChange
+    ? `只會送出有變動的 ${s.changedTotal} 筆${s.removed ? '（＋刪除）' : ''}，不會重傳整份 ${incomingCount.toLocaleString()} 筆。`
+    : '沒有任何變動，按「套用」也不會送出任何請求。';
+
+  const confirmBtn = $('excelDiffConfirm');
+  confirmBtn.textContent = hasChange
+    ? `套用 ${s.changedTotal} 筆變更${s.removed && deleteBox.checked ? `，刪除 ${s.removed}` : ''}`
+    : '知道了';
+  confirmBtn.disabled = false;
+
+  modal.classList.add('show');
+
+  const close = () => {
+    modal.classList.remove('show');
+    confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+    const cancel = $('excelDiffCancel');
+    if (cancel) cancel.replaceWith(cancel.cloneNode(true));
+  };
+
+  $('excelDiffCancel').addEventListener('click', () => {
+    close();
+    toast('已取消，商品資料沒有變動');
+  });
+  $('excelDiffConfirm').addEventListener('click', async () => {
+    if (!hasChange) { close(); toast('商品清單沒有變動'); return; }
+    const deleteRemoved = !deleteWrap.hidden && $('excelDiffDelete').checked;
+    const btn = $('excelDiffConfirm');
+    btn.disabled = true;
+    btn.textContent = '套用中…';
+    close();
+    try {
+      await apply({ deleteRemoved });
+    } catch (err) {
+      showStatus('excelStatus', `套用失敗：${err.message}`, 'error');
+    }
+  });
+}
+
+/* ------------------------------------------------------------ 配對管理 UI */
 /* ------------------------------------------------------------ 配對管理 UI */
 
 function getLabelProduct(label) {
@@ -2247,6 +2463,11 @@ window.app = {
   deleteAllPdf,
   setDeferred,
   deferAllUnmatched,
+  diffProducts,
+  buildProductsFromRows,
+  applyExcelDiff,
+  openExcelDiffModal,
+  importExcel,
   formatSummary,
   formatOf
 };

@@ -242,6 +242,21 @@ export async function putProducts(list, chunkSize = 200) {
   }
 }
 
+/** 只刪除指定商品（Excel 增量匯入用），不再整表重寫。 */
+export async function deleteProducts(ids, chunkSize = 200) {
+  if (!ids || !ids.length) return 0;
+  let removed = 0;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    await withTx('products', 'readwrite', tx => {
+      const store = tx.objectStore('products');
+      for (const id of chunk) store.delete(Number(id));
+    });
+    removed += chunk.length;
+  }
+  return removed;
+}
+
 /* -------------------------------------------------------------------- labels */
 
 export async function getLabels() {

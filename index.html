@@ -74,6 +74,16 @@
 .clear-opt small{color:#64748b}
 .format-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
 .format-row .btn{width:auto;flex:1 1 45%}
+.diff-counts{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.diff-chip{font-size:13px;padding:4px 10px;border-radius:999px;background:#f1f5f9;color:#334155}
+.diff-chip.add{background:#dcfce7;color:#166534}
+.diff-chip.mod{background:#fef9c3;color:#854d0e}
+.diff-chip.del{background:#fee2e2;color:#991b1b}
+.diff-chip.same{background:#e2e8f0;color:#475569}
+.diff-rows{max-height:38vh;overflow:auto;font-size:13px;line-height:1.5}
+.diff-rows ul{margin:4px 0 10px;padding-left:20px}
+.diff-delete{display:flex;gap:8px;align-items:flex-start;margin:12px 0;font-size:14px}
+.warn-text{color:#b91c1c}
 </style>
 </head>
 <body>
@@ -223,6 +233,24 @@
     <div class="modal-search"><input type="text" id="modalSearchInput" placeholder="搜尋商品名稱或條碼..."></div>
     <div id="modalProductList" style="max-height:42dvh;overflow-y:auto"></div>
     <button class="modal-close" id="modalCloseBtn">取消</button>
+  </div>
+</div>
+
+<div class="modal-overlay" id="excelDiffModal">
+  <div class="modal">
+    <h3>📊 Excel 比對結果</h3>
+    <div class="sub" id="excelDiffFile"></div>
+    <div class="diff-counts" id="excelDiffCounts"></div>
+    <div class="diff-rows" id="excelDiffRows"></div>
+    <label class="diff-delete" id="excelDiffDeleteWrap" hidden>
+      <input type="checkbox" id="excelDiffDelete" checked>
+      <span id="excelDiffDeleteText"></span>
+    </label>
+    <div class="sub" id="excelDiffNote"></div>
+    <div class="edit-actions">
+      <button class="btn btn-primary btn-sm" id="excelDiffConfirm">套用</button>
+      <button class="btn btn-outline btn-sm" id="excelDiffCancel">取消</button>
+    </div>
   </div>
 </div>
 

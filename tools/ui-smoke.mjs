@@ -98,6 +98,15 @@ Object.defineProperty(excelInput, 'files', { value: [excelFile], configurable: t
 excelInput.dispatchEvent(new window.Event('change'));
 await new Promise(r => setTimeout(r, 1500));
 
+// 匯入 Excel 現在會先跳「比對結果」視窗，確認後才套用
+const diffModal = document.getElementById('excelDiffModal');
+console.log('  比對視窗:', diffModal.classList.contains('show') ? '已顯示' : '未顯示',
+  '|', document.getElementById('excelDiffCounts').textContent.replace(/\s+/g, ' ').trim());
+if (diffModal.classList.contains('show')) {
+  document.getElementById('excelDiffConfirm').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 2000));
+}
+console.log('  比對視窗關閉:', !diffModal.classList.contains('show'));
 console.log('  excelStatus:', document.getElementById('excelStatus').textContent);
 console.log('  statProducts:', document.getElementById('statProducts').textContent);
 const storedProducts = await db.getProducts();
