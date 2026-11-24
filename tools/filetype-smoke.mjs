@@ -125,6 +125,36 @@ check('原始檔名保留（分享給 WePrint 要用原名）', pdfLabel && pdfL
 check('圖片標籤判定為 image', imgLabel && imgLabel.kind === 'image', imgLabel && imgLabel.kind);
 check('未知格式判定為 file', weirdLabel && weirdLabel.kind === 'file', weirdLabel && weirdLabel.kind);
 
+/* ------------------------- 2b. 從「選檔 input」進來的路徑（真正的 bug 點） */
+console.log('\n=== 2b. 從選檔 input 選 .wdfx ===');
+const input = document.getElementById('pdfInput');
+check('選檔 input 沒有 accept 限制', !input.getAttribute('accept'), input.getAttribute('accept') || '(無)');
+
+const wdfxFiles = [
+  new File([bigPdf], '沐浴乳 1L.wdfx', { type: '', lastModified: 1763100005000 }),
+  new File([weirdBytes], '包裝外盒.wdfx', { type: '', lastModified: 1763100006000 })
+];
+Object.defineProperty(input, 'files', { value: wdfxFiles, configurable: true });
+input.dispatchEvent(new window.Event('change'));
+
+let waited2 = 0;
+while (waited2 < 20000) {
+  const jobs2 = pipeline.getJobs();
+  const fresh = jobs2.filter(j => /沐浴乳 1L\.wdfx|包裝外盒\.wdfx/.test(j.name));
+  if (fresh.length === 2 && fresh.every(j => ['ready', 'done', 'duplicate', 'failed'].includes(j.status))) break;
+  await wait(100);
+  waited2 += 100;
+}
+state.labels = pipeline.getLabels();
+const wdfxLabels = Object.values(state.labels).filter(l => /\.wdfx$/.test(l.filename || ''));
+const newOnes = wdfxLabels.filter(l => /沐浴乳 1L\.wdfx|包裝外盒\.wdfx/.test(l.filename || ''));
+check('選 .wdfx 真的會進入處理流程（舊版會在這裡被過濾掉）', newOnes.length === 2,
+  `${newOnes.length} 筆：${newOnes.map(l => l.filename).join(', ')}`);
+check('狀態列顯示「已選取 N 個檔案」', /已選取 2 個檔案/.test(document.getElementById('pdfStatus').textContent)
+  || /本批/.test(document.getElementById('pdfStatus').textContent),
+  document.getElementById('pdfStatus').textContent.slice(0, 60));
+check('介面版本標記存在（方便確認手機是否新版）', /介面版本 3\.1/.test(document.body.textContent));
+
 /* ------------------------------------------------------- 3. 站內預覽行為 */
 console.log('\n=== 3. 站內預覽 ===');
 await window.app.previewLabel(imgLabel.id);

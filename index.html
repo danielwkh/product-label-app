@@ -65,6 +65,10 @@
 .edit-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
 .edit-actions .btn{width:auto;flex:1 1 45%}
 .tag-dup{background:#fee2e2;color:#991b1b;border-radius:999px;padding:2px 8px;font-size:.75rem}
+.pick-help{margin-top:10px;font-size:.82rem;color:#475569}
+.pick-help summary{cursor:pointer;color:#2563eb;padding:6px 0}
+.pick-help ol{margin:6px 0 0 18px;line-height:1.7}
+.build-tag{margin-top:10px;font-size:.72rem;color:#94a3b8;text-align:right}
 </style>
 </head>
 <body>
@@ -99,6 +103,16 @@
     </div>
     <div id="pdfStatus" class="status"></div>
     <div class="hint">處理中請保持此頁在前景；iPhone 鎖屏或切到其他 App 太久，系統可能暫停背景的儲存動作，回來後可按「繼續」。</div>
+    <details class="pick-help">
+      <summary>選不到檔案？（.wdfx 等）</summary>
+      <ol>
+        <li>在轉檔 App 內按「分享 → 儲存到『檔案』」，先放進「我的 iPhone」或 iCloud Drive。</li>
+        <li>回到這裡按「選擇多個檔案」→ 左上角「瀏覽」→ 找到剛存的檔案。</li>
+        <li>如果檔案是灰色不能點：這個頁面還是舊版（選檔仍被限制成 PDF），請關掉分頁重新開一次。</li>
+        <li>如果清單看不到該檔案：它可能還在 App 的私有空間，需要先「儲存到檔案」。</li>
+      </ol>
+    </details>
+    <div class="build-tag">介面版本 3.1（支援 .wdfx 等非 PDF 檔案）</div>
   </div>
 
   <div class="card jobs-card" id="jobsCard">

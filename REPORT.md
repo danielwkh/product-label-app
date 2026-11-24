@@ -822,3 +822,24 @@ tools/stress-test.mjs       T1–T12              ✅（含 174 檔端到端、�
 ✅ bootstrap 商品 22,481 筆不變、ETag 304、標籤 176 筆
 ✅ 測試用暫存標籤已刪除，標籤數回到 176
 ```
+
+### 修正：`.wdfx` 選得到但「上傳不到」
+
+上線後使用者回報選了 `.wdfx` 沒有任何反應，原因是 **`handlePdfSelection()` 自己又做了一次副檔名過濾**：
+
+```js
+const files = Array.from(fileList || []).filter(f => /\.pdf$/i.test(f.name || ''));   // ← 把 .wdfx 全丟掉
+if (!files.length) { toast('沒有可處理的 PDF'); return; }
+```
+
+`pipeline.intake()` 已經改成看檔頭，但畫面層這一關沒改，所以檔案在進入流程前就被丟棄（只跳一個小 toast，
+很容易漏看）。修正內容：
+
+1. `handlePdfSelection()` 不再用副檔名過濾，只排除 0 bytes 的檔案，並在狀態列說明原因
+   （例如 iCloud 檔案還沒下載完成）。
+2. 上傳卡片加入可展開的「選不到檔案？」4 步說明（分享 → 儲存到「檔案」 → 瀏覽 → 灰色代表頁面是舊版）。
+3. 卡片右下角加 **介面版本 3.1** 標記：以後只要看這個就知道手機跑的是不是新版。
+4. 進度摘要改口徑「本批 N 個檔案」（原本寫 PDF）。
+
+測試：`tools/filetype-smoke.mjs` 增加「從真正的 `<input type=file>` 選 .wdfx」情境（**28 / 28 通過**），
+`ui-smoke`（174 個 PDF）也重新通過。

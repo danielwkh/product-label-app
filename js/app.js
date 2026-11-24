@@ -295,9 +295,15 @@ let pdfIntakeRunning = false;
 let cloudReady = null;
 
 async function handlePdfSelection(fileList) {
-  const files = Array.from(fileList || []).filter(f => /\.pdf$/i.test(f.name || ''));
+  // 不再用副檔名過濾（.wdfx 等 PDF 改名的檔案要能進來）；
+  // 只排除空檔案，真正格式由 pipeline 讀檔頭判斷。
+  const all = Array.from(fileList || []);
+  const files = all.filter(f => f && (f.size || 0) > 0);
   if (!files.length) {
-    toast('沒有可處理的 PDF');
+    showStatus('pdfStatus', all.length
+      ? '選到的檔案都是 0 bytes（可能是 iCloud 檔案還沒下載完成），請在「檔案」App 先開啟一次再選。'
+      : '沒有選到檔案。如果 .wdfx 在選檔畫面是灰色或看不到，請看下面「選不到檔案？」的說明。', 'warn');
+    toast('沒有選到可處理的檔案');
     return;
   }
   // 上一批若已全部結束，先清掉進度列，讓新的批次從乾淨的清單開始
@@ -340,7 +346,7 @@ async function handlePdfSelection(fileList) {
     }).length;
     showStatus(
       'pdfStatus',
-      `本批 ${current.length} 個 PDF：已完成 ${finished} 個${dup ? `（${dup} 個之前已存在而略過）` : ''}、自動配對 ${matchedCount} 個${failed ? `、${failed} 個失敗（可按「重試失敗」）` : ''}。`
+      `本批 ${current.length} 個檔案：已完成 ${finished} 個${dup ? `（${dup} 個之前已存在而略過）` : ''}、自動配對 ${matchedCount} 個${failed ? `、${failed} 個失敗（可按「重試失敗」）` : ''}。`
     );
     if (state.cloudEnabled) await pipeline.waitUploads();
     await refreshStateFromPipeline();
