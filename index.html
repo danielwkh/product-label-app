@@ -72,6 +72,8 @@
 .clear-opt{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:8px;font-size:.88rem}
 .clear-opt input{margin-top:3px}
 .clear-opt small{color:#64748b}
+.format-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
+.format-row .btn{width:auto;flex:1 1 45%}
 </style>
 </head>
 <body>
@@ -167,6 +169,11 @@
       <button class="filter-btn" data-filter="dup">🔁 重複 <span id="dupCount">0</span></button>
     </div>
     <div id="matchSummary" class="match-summary"></div>
+    <div class="format-row">
+      <button class="btn btn-outline btn-sm" id="keepWdfxBtn">🧹 每組只保留 .WDFX</button>
+      <button class="btn btn-danger btn-sm" id="deletePdfBtn">🗑 刪除所有 PDF</button>
+    </div>
+    <div class="job-mode" id="formatInfo" style="margin-bottom:8px"></div>
     <div id="dupBanner" class="dup-banner" style="display:none">
       <div id="dupBannerText"></div>
       <div class="bulk-actions" style="margin-top:8px">

@@ -902,3 +902,38 @@ if (!files.length) { toast('沒有可處理的 PDF'); return; }
 測試：`tools/api-integration.mjs` **39 / 39**（新增 6 項：錯誤確認字串被拒、scope 不合法被拒、清標籤不動商品、
 商品 `label_id` 清空、R2 歸零、清商品歸零），`tools/label-edit-smoke.mjs` **57 / 57**
 （新增分頁順序、視窗顯示筆數、必須輸入「清除」才能按、送出內容正確、本機同步清空）。
+
+---
+
+## 16. 「不想再留 PDF」→ 只保留 .wdfx（2026-11-24）
+
+使用者需求：轉成 `.wdfx` 之後不想再保留 PDF。用「清除雲端資料」會連 `.wdfx` 一起清掉，太粗暴，
+因此在 **配對管理** 上方新增「格式」區塊：
+
+```
+格式：PDF 172 個 · WDFX 187 個
+[🧹 每組只保留 .WDFX]  [🗑 刪除所有 PDF]
+```
+
+### 🧹 每組只保留 .WDFX（建議）
+
+- 依「同名」（去副檔名與檔名雜訊）分組，每組只保留 `.wdfx`，刪掉同組的 PDF。
+- **配對會先轉移**：若該組的 PDF 有人工配對、而 `.wdfx` 沒有，會先把 `productId / matchedProductName /
+  matchSource / matchScore / matchConfidence / matchGap / matchWhy` 複製到 `.wdfx`
+  （本機 IndexedDB + 雲端 PATCH + 商品的 `label_id` 一起改），再刪 PDF。
+- 若 `.wdfx` 本身已經有配對，不會被覆蓋。
+- 沒有 `.wdfx` 版本的 PDF（孤兒）**不會被這個按鈕刪除**，狀態列會提示「還有 N 個 PDF 沒有 .wdfx 版本」。
+
+### 🗑 刪除所有 PDF
+
+- 連孤兒 PDF 一起刪；若有孤兒會多跳一個確認視窗，明確告知「刪除後就完全沒有檔案了」。
+- 沒有 PDF 時兩個按鈕自動停用。
+
+### 刪除的實作
+
+`deleteLabels()` 現在會把雲端 ID **每 250 筆一批**送出（伺服器上限 300），避免一次請求過大；
+本機同步刪除 IndexedDB 記錄與 Blob（共用同一個 hash 的 Blob 不會誤刪）。
+
+測試：`tools/label-edit-smoke.mjs` **70 / 70**（新增 13 項：格式統計、孤兒判定、配對轉移、
+不覆蓋既有配對、商品 labelId 跟著搬、IndexedDB 同步、狀態列提示、按鈕停用）。
+`ui-smoke` 全數通過。`sw-v6.js` 版本 `v11 → v12`。

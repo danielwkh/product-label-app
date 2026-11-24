@@ -846,12 +846,16 @@ async function deleteLabels(ids, options = {}) {
   let cloudFailed = 0;
   const cloudIds = targets.filter(label => label.uploaded).map(label => label.id);
   if (state.cloudEnabled && cloudIds.length) {
-    try {
-      if (cloudIds.length === 1) await api.deleteLabel(cloudIds[0]);
-      else await api.bulkDeleteLabels(cloudIds);
-    } catch (err) {
-      cloudFailed = cloudIds.length;
-      console.warn('[labels] 雲端刪除失敗，僅刪除本機', err);
+    // 伺服器一次最多 300 筆 → 這裡分批 250，避免一次請求太大
+    for (let i = 0; i < cloudIds.length; i += 250) {
+      const chunk = cloudIds.slice(i, i + 250);
+      try {
+        if (chunk.length === 1) await api.deleteLabel(chunk[0]);
+        else await api.bulkDeleteLabels(chunk);
+      } catch (err) {
+        cloudFailed += chunk.length;
+        console.warn('[labels] 雲端刪除失敗，僅刪除本機', err);
+      }
     }
   }
 
@@ -917,6 +921,113 @@ async function renameLabel(id, rawName) {
   renderMatchList();
   toast(`已更新標籤名稱${cloudNote}`);
   return true;
+}
+
+/* --------------------------------------------------------- 格式管理（PDF / WDFX） */
+
+function formatOf(label) {
+  return String(label.ext || extFromName(label.filename) || '').toLowerCase();
+}
+
+function formatSummary() {
+  const labels = Object.values(state.labels);
+  const pdf = labels.filter(label => formatOf(label) === 'pdf');
+  const wdfx = labels.filter(label => formatOf(label) === 'wdfx');
+  const hasWdfxTwin = label => {
+    const key = labelNameKey(label);
+    return labels.some(other => other.id !== label.id && labelNameKey(other) === key && formatOf(other) === 'wdfx');
+  };
+  return {
+    pdf,
+    wdfx,
+    pdfWithTwin: pdf.filter(hasWdfxTwin),
+    pdfWithoutTwin: pdf.filter(label => !hasWdfxTwin(label))
+  };
+}
+
+// 把配對（含人工鎖定）從一份檔案搬到另一份
+async function transferMatch(from, to) {
+  to.productId = from.productId ?? null;
+  to.matchedProductName = from.matchedProductName || null;
+  to.matchSource = from.matchSource || null;
+  to.matchScore = from.matchScore ?? null;
+  to.matchConfidence = from.matchConfidence || null;
+  to.matchGap = from.matchGap ?? null;
+  to.matchWhy = from.matchWhy ?? null;
+  to.updatedAt = nowISO();
+
+  try { await db.putLabel(to); } catch (err) { console.warn('[format] 本機配對更新失敗', err); }
+  const touched = state.products.filter(product => product.labelId === from.id || product.labelId === to.id);
+  for (const product of touched) product.labelId = to.id;
+  if (touched.length) {
+    try { await db.putProducts(touched); } catch (err) { console.warn('[format] 商品連結更新失敗', err); }
+  }
+  if (state.cloudEnabled && to.uploaded) {
+    try {
+      await api.patchLabel(to.id, {
+        productId: to.productId,
+        matchedProductName: to.matchedProductName,
+        matchSource: to.matchSource,
+        matchScore: to.matchScore,
+        matchConfidence: to.matchConfidence,
+        matchGap: to.matchGap,
+        matchWhy: to.matchWhy
+      });
+    } catch (err) { console.warn('[format] 雲端配對轉移失敗', err); }
+  }
+}
+
+// 每一組同名檔案只留 .wdfx，PDF 刪掉（配對先轉移過去）
+async function keepOnlyWdfx() {
+  const labels = Object.values(state.labels);
+  const groups = groupBy(labels, labelNameKey);
+  const toDelete = [];
+  const transfers = [];
+  let groupsHandled = 0;
+
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const wdfx = list.filter(label => formatOf(label) === 'wdfx');
+    const others = list.filter(label => formatOf(label) !== 'wdfx');
+    if (!wdfx.length || !others.length) continue;
+    const keeper = wdfx.find(label => label.matchedProductName) || wdfx.slice().sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')))[0];
+    const donor = others.find(label => label.matchedProductName);
+    if (donor && !keeper.matchedProductName) transfers.push({ from: donor, to: keeper });
+    for (const label of others) toDelete.push(label.id);
+    groupsHandled += 1;
+  }
+
+  if (!toDelete.length) {
+    toast('沒有「同時有 PDF 與 .wdfx」的標籤需要處理');
+    return;
+  }
+  const message = `每一組只保留 .wdfx，刪除 ${toDelete.length} 個 PDF（共 ${groupsHandled} 組）？`
+    + (transfers.length ? `\n其中 ${transfers.length} 筆配對會先轉移到 .wdfx。` : '')
+    + '\n雲端的 PDF 檔案也會一併刪除，無法復原。';
+  if (!confirm(message)) return;
+
+  for (const { from, to } of transfers) await transferMatch(from, to);
+  const removed = await deleteLabels(toDelete, { silent: true });
+  const { pdfWithoutTwin } = formatSummary();
+  toast(`已刪除 ${removed} 個 PDF${transfers.length ? `，轉移 ${transfers.length} 筆配對` : ''}`);
+  showStatus('pdfStatus', `已刪除 ${removed} 個 PDF；還有 ${pdfWithoutTwin.length} 個 PDF 沒有 .wdfx 版本${pdfWithoutTwin.length ? '（如也要刪除，按「刪除所有 PDF」）' : ''}`, 'warn');
+}
+
+async function deleteAllPdf() {
+  const { pdf, pdfWithoutTwin } = formatSummary();
+  if (!pdf.length) {
+    toast('目前沒有 PDF 標籤');
+    return;
+  }
+  const base = `刪除全部 ${pdf.length} 個 PDF 標籤？雲端檔案也會一併刪除，無法復原。`;
+  if (!confirm(base)) return;
+  if (pdfWithoutTwin.length) {
+    const warning = `注意：其中 ${pdfWithoutTwin.length} 個 PDF「沒有 .wdfx 版本」，刪除後就完全沒有檔案了。\n仍要繼續嗎？`;
+    if (!confirm(warning)) return;
+  }
+  const removed = await deleteLabels(pdf.map(label => label.id), { silent: true });
+  toast(`已刪除 ${removed} 個 PDF`);
+  showStatus('pdfStatus', `已刪除 ${removed} 個 PDF 標籤；目前標籤 ${Object.keys(state.labels).length} 筆`, 'warn');
 }
 
 /* ------------------------------------------------- 清除雲端資料（危險操作） */
@@ -1060,6 +1171,21 @@ function renderMatchList() {
 
   const visibleIds = new Set(filtered.map(l => l.id));
   for (const id of [...state.selectedLabelIds]) if (!visibleIds.has(id)) state.selectedLabelIds.delete(id);
+
+  const formatInfo = $('formatInfo');
+  if (formatInfo) {
+    const labels = Object.values(state.labels);
+    const pdfCount = labels.filter(label => formatOf(label) === 'pdf').length;
+    const wdfxCount = labels.filter(label => formatOf(label) === 'wdfx').length;
+    const otherCount = labels.length - pdfCount - wdfxCount;
+    formatInfo.textContent = labels.length
+      ? `格式：PDF ${pdfCount} 個 · WDFX ${wdfxCount} 個${otherCount ? ` · 其他 ${otherCount} 個` : ''}`
+      : '';
+    const wdfxBtn = $('keepWdfxBtn');
+    const pdfBtn = $('deletePdfBtn');
+    if (wdfxBtn) wdfxBtn.disabled = !pdfCount;
+    if (pdfBtn) pdfBtn.disabled = !pdfCount;
+  }
 
   const dupGroups = new Set([...dups.keys()].map(id => labelDupKey(state.labels[id] || {}))).size;
   $('matchSummary').textContent = `顯示 ${filtered.length} / ${all.length} 個標籤 · 已配對 ${all.filter(x => x.matchedProductName).length}`
@@ -1733,6 +1859,10 @@ function bindEvents() {
     toast(`已勾選 ${extras.length} 筆多餘的重複標籤`);
   });
 
+  /* 格式管理 */
+  if ($('keepWdfxBtn')) $('keepWdfxBtn').addEventListener('click', keepOnlyWdfx);
+  if ($('deletePdfBtn')) $('deletePdfBtn').addEventListener('click', deleteAllPdf);
+
   /* 清除雲端資料 */
   if ($('clearCloudBtn')) $('clearCloudBtn').addEventListener('click', openClearCloudModal);
   if ($('clearCloudCancelBtn')) $('clearCloudCancelBtn').addEventListener('click', closeClearCloudModal);
@@ -2009,7 +2139,11 @@ window.app = {
   labelDupKey,
   openClearCloudModal,
   runClearCloud,
-  closeClearCloudModal
+  closeClearCloudModal,
+  keepOnlyWdfx,
+  deleteAllPdf,
+  formatSummary,
+  formatOf
 };
 
 boot();

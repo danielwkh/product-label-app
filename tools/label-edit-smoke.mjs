@@ -291,6 +291,63 @@ check('清除後本機標籤也清空（避免又同步回去）', Object.keys(s
 check('商品沒有被清掉', state.products.length === 2, `${state.products.length}`);
 check('視窗已關閉', !document.getElementById('clearCloudModal').classList.contains('show'));
 
+/* ------------------------- 9. 只保留 .wdfx（配對要轉移過去） */
+console.log('\n=== 9. 每組只保留 .wdfx ===');
+state.cloudEnabled = false;
+state.labels = {};
+state.products = [{ id: 501, name: '白象老母雞湯麵585克', labelId: 'w-pdf-matched' }];
+const mkPair = (id, name, ext, extra = {}) => ({
+  ...makeLabel(id, `hash-${id}`, name),
+  filename: `${name}.${ext}`, ext, kind: ext === 'pdf' ? 'pdf' : 'file',
+  mime: ext === 'pdf' ? 'application/pdf' : 'application/octet-stream', uploaded: false, ...extra
+});
+const pairSet = [
+  // A 組：PDF 有人工配對，wdfx 沒有 → 配對要搬到 wdfx
+  mkPair('w-pdf-matched', '白象老母雞湯麵585克', 'pdf', { productId: 501, matchedProductName: '白象老母雞湯麵585克', matchSource: 'manual', matchConfidence: 'manual' }),
+  mkPair('w-wdfx-plain', '白象老母雞湯麵585克', 'wdfx'),
+  // B 組：wdfx 自己就有配對 → 直接留 wdfx
+  mkPair('w-pdf-plain', '一町刀削麵', 'pdf'),
+  mkPair('w-wdfx-matched', '一町刀削麵', 'wdfx', { productId: 502, matchedProductName: '一町刀削麵', matchSource: 'manual' }),
+  // C 組：只有 PDF，沒有 wdfx → 不能被「只留 wdfx」動到
+  mkPair('w-only-pdf', '孤兒 PDF 商品', 'pdf')
+];
+for (const label of pairSet) {
+  state.labels[label.id] = label;
+  await db.putLabel(label);
+}
+window.app.renderMatchList();
+check('格式統計正確', /PDF 3 個 · WDFX 2 個/.test(document.getElementById('formatInfo').textContent),
+  document.getElementById('formatInfo').textContent);
+
+const summary = window.app.formatSummary();
+check('知道哪些 PDF 沒有 .wdfx 版本', summary.pdfWithoutTwin.length === 1 && summary.pdfWithoutTwin[0].id === 'w-only-pdf',
+  summary.pdfWithoutTwin.map(l => l.id).join(','));
+check('知道哪些 PDF 有 .wdfx 版本', summary.pdfWithTwin.length === 2, summary.pdfWithTwin.map(l => l.id).join(','));
+
+await window.app.keepOnlyWdfx();
+await wait(400);
+check('有 .wdfx 版本的 PDF 都被刪除', !state.labels['w-pdf-matched'] && !state.labels['w-pdf-plain'],
+  Object.keys(state.labels).join(','));
+check('沒有 .wdfx 的孤兒 PDF 保留', Boolean(state.labels['w-only-pdf']));
+check('配對已轉移到 .wdfx', state.labels['w-wdfx-plain'].matchedProductName === '白象老母雞湯麵585克'
+  && state.labels['w-wdfx-plain'].matchSource === 'manual',
+  `${state.labels['w-wdfx-plain'].matchedProductName} / ${state.labels['w-wdfx-plain'].matchSource}`);
+check('原本有配對的 .wdfx 配對沒有被覆蓋', state.labels['w-wdfx-matched'].matchedProductName === '一町刀削麵');
+check('商品的 labelId 指向新的 .wdfx', state.products[0].labelId === 'w-wdfx-plain', state.products[0].labelId);
+const storedWdfx = await db.getLabel('w-wdfx-plain');
+check('IndexedDB 上的配對也更新了', storedWdfx && storedWdfx.productId === 501, storedWdfx && storedWdfx.productId);
+check('狀態列說明還有 1 個 PDF 沒有 .wdfx 版本', /還有 1 個 PDF 沒有 .wdfx 版本/.test(document.getElementById('pdfStatus').textContent),
+  document.getElementById('pdfStatus').textContent.slice(0, 60));
+
+/* -------------------------------- 10. 刪除所有 PDF（含沒有 wdfx 的孤兒） */
+console.log('\n=== 10. 刪除所有 PDF ===');
+await window.app.deleteAllPdf();
+await wait(400);
+check('所有 PDF 都刪除', window.app.formatSummary().pdf.length === 0, `剩 ${window.app.formatSummary().pdf.length}`);
+check('只留下 .wdfx', Object.keys(state.labels).sort().join(',') === 'w-wdfx-matched,w-wdfx-plain',
+  Object.keys(state.labels).join(','));
+check('按鈕在沒有 PDF 時會被停用', (() => { window.app.renderMatchList(); return document.getElementById('deletePdfBtn').disabled; })());
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);
