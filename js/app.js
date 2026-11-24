@@ -25,7 +25,7 @@ import {
   barcodeMatchesTail
 } from './core/text.js';
 import { createJobsView, formatBytes } from './ui/jobs-view.js';
-import { labelKind, extFromName } from './core/filetype.js';
+import { labelKind, extFromName, stripExtension } from './core/filetype.js';
 
 const $ = id => document.getElementById(id);
 const api = createApi({ base: './api/' });
@@ -761,18 +761,41 @@ function labelDupKey(label) {
   return `n:${normalize(label.nameFromFile || label.filename || '')}`;
 }
 
-// 回傳 Map<labelId, 同組筆數>
-function duplicateMap(labels) {
+// 「同名」判定：去掉副檔名後，只保留中英數字（忽略空白、_、-、（）、. 等檔名雜訊）
+// 用途：抓出「同一張標籤的 PDF 與轉檔後的 .wdfx」這種內容不同但其實重複的檔案
+function labelNameKey(label) {
+  const base = stripExtension(label.nameFromFile || label.filename || '');
+  return base.toLowerCase().replace(/[^0-9a-z\u3400-\u9fff]+/g, '');
+}
+
+function groupBy(labels, keyOf) {
   const groups = new Map();
   for (const label of labels) {
-    const key = labelDupKey(label);
+    const key = keyOf(label);
+    if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(label);
   }
+  return groups;
+}
+
+// 回傳 Map<labelId, { size, type }>；type = 'content'（完全相同）或 'name'（同名不同檔）
+function duplicateMap(labels) {
   const map = new Map();
-  for (const list of groups.values()) {
+  const contentGroups = groupBy(labels, label => (label.hash ? `h:${label.hash}` : null));
+  for (const list of contentGroups.values()) {
     if (list.length < 2) continue;
-    for (const label of list) map.set(label.id, list.length);
+    for (const label of list) map.set(label.id, { size: list.length, type: 'content' });
+  }
+  const nameGroups = groupBy(labels, labelNameKey);
+  for (const list of nameGroups.values()) {
+    if (list.length < 2) continue;
+    const distinct = new Set(list.map(label => label.hash || `id:${label.id}`));
+    for (const label of list) {
+      const current = map.get(label.id);
+      if (current && current.type === 'content') continue;
+      map.set(label.id, { size: list.length, type: distinct.size > 1 ? 'name' : 'content' });
+    }
   }
   return map;
 }
@@ -785,19 +808,34 @@ function pickKeeper(list) {
 }
 
 function extraDuplicateIds(labels) {
-  const groups = new Map();
-  for (const label of labels) {
-    const key = labelDupKey(label);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(label);
-  }
-  const extras = [];
-  for (const list of groups.values()) {
+  const extras = new Set();
+
+  // 第一層：內容完全相同（同 hash）→ 只留一筆
+  const contentGroups = groupBy(labels, label => (label.hash ? `h:${label.hash}` : null));
+  for (const list of contentGroups.values()) {
     if (list.length < 2) continue;
     const keeper = pickKeeper(list);
-    for (const label of list) if (label.id !== keeper.id) extras.push(label.id);
+    for (const label of list) if (label.id !== keeper.id) extras.add(label.id);
   }
-  return extras;
+
+  // 第二層：同名不同檔（例如 PDF 與轉檔後的 .wdfx）→ 每一種內容各留一筆代表後，再只留一筆
+  const nameGroups = groupBy(labels, labelNameKey);
+  for (const list of nameGroups.values()) {
+    if (list.length < 2) continue;
+    const representatives = [];
+    const seen = new Set();
+    for (const label of list) {
+      const key = label.hash || `id:${label.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      representatives.push(label);
+    }
+    if (representatives.length < 2) continue;
+    const keeper = pickKeeper(representatives);
+    for (const label of representatives) if (label.id !== keeper.id) extras.add(label.id);
+  }
+
+  return [...extras];
 }
 
 // 刪除標籤：雲端（R2 + D1）、本機（IndexedDB + Blob）、商品連結一起處理
@@ -954,8 +992,11 @@ function renderMatchList() {
     const text = $('dupBannerText');
     if (dupExtras.length && state.matchFilter !== 'dup') {
       banner.style.display = '';
-      if (text) text.innerHTML = `🔁 發現 <b>${dupGroups}</b> 組重複，共 <b>${dupExtras.length}</b> 筆是多餘的（內容相同）。`
-        + ' 建議先確認要保留哪一筆，再「每組只留一筆」。';
+      const sameContent = [...dups.values()].filter(info => info.type === 'content').length;
+      const sameName = [...dups.values()].filter(info => info.type === 'name').length;
+      if (text) text.innerHTML = `🔁 發現 <b>${dupGroups}</b> 組重複，共 <b>${dupExtras.length}</b> 筆是多餘的`
+        + `（內容完全相同 ${sameContent} 筆、同名不同檔 ${sameName} 筆，例如 PDF 與轉檔後的 .wdfx）。`
+        + '<br>「同名不同檔」請用每一筆的「保留這筆」決定要留哪個格式，再按「每組只留一筆」會依〔人工配對 → 已配對 → 最新上傳〕自動選。';
     } else if (!dupExtras.length) {
       banner.style.display = 'none';
     } else {
@@ -989,7 +1030,7 @@ function renderMatchList() {
           return `<span class="tag-warn">${escapeHtml(ext)}${kind === 'image' ? '（可預覽）' : '（不支援預覽）'}</span>`; })()}
         ${l.matchScore && !manual ? `<span>信心 ${l.matchScore}${l.matchGap != null ? ` · 差距 ${l.matchGap}` : ''}</span>` : ''}
       </div>
-      ${dups.get(l.id) ? `<div><span class="tag-dup">重複 ×${dups.get(l.id)}</span></div>` : ''}
+      ${dups.get(l.id) ? `<div><span class="tag-dup">${dups.get(l.id).type === 'content' ? '重複' : '同名'} ×${dups.get(l.id).size}</span></div>` : ''}
       ${l.matchWhy && !manual ? `<div class="score-note">判斷依據：${escapeHtml(l.matchWhy)}</div>` : ''}
       <div class="label-actions">
         ${linked
@@ -999,7 +1040,7 @@ function renderMatchList() {
         <button class="btn btn-outline btn-sm" data-action="preview" data-id="${escapeHtml(l.id)}">預覽</button>
         <button class="btn btn-outline btn-sm" data-action="edit" data-id="${escapeHtml(l.id)}">✏️ 編輯</button>
         <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(l.id)}">刪除</button>
-        ${dups.get(l.id) ? `<button class="btn btn-primary btn-sm" data-action="keep" data-id="${escapeHtml(l.id)}">保留這筆，刪除其他 ${dups.get(l.id) - 1} 筆</button>` : ''}
+        ${dups.get(l.id) ? `<button class="btn btn-primary btn-sm" data-action="keep" data-id="${escapeHtml(l.id)}">保留這筆，刪除其他 ${dups.get(l.id).size - 1} 筆</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -1467,11 +1508,18 @@ function bindEvents() {
       } else if (action === 'keep') {
         const label = state.labels[id];
         if (!label) return;
-        const key = labelDupKey(label);
-        const others = Object.values(state.labels)
-          .filter(other => other.id !== id && labelDupKey(other) === key)
-          .map(other => other.id);
-        if (!others.length) return;
+        // 同名的（例如同一張標籤的 pdf 與 wdfx）優先；沒有同名才退回同內容
+        const nameKey = labelNameKey(label);
+        const sameName = Object.values(state.labels)
+          .filter(other => other.id !== id && labelNameKey(other) === nameKey);
+        const others = (sameName.length
+          ? sameName
+          : Object.values(state.labels).filter(other => other.id !== id && label.hash && other.hash === label.hash)
+        ).map(other => other.id);
+        if (!others.length) {
+          toast('這個標籤沒有其他重複項目了');
+          return;
+        }
         if (confirm(`保留「${label.nameFromFile || label.filename}」，刪除其他 ${others.length} 筆相同內容的標籤？`)) {
           deleteLabels(others);
         }

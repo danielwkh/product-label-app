@@ -95,8 +95,9 @@ console.log(`  已建立 ${labels.length} 筆標籤（2 組重複）`);
 console.log('\n=== 1. 重複偵測與顯示 ===');
 const dupMap = window.app.duplicateMap(Object.values(state.labels));
 check('偵測到 5 筆屬於重複群組', dupMap.size === 5, `${dupMap.size}`);
-check('每組筆數正確（3 與 2）', dupMap.get('dupA-1') === 3 && dupMap.get('dupB-1') === 2,
-  `${dupMap.get('dupA-1')} / ${dupMap.get('dupB-1')}`);
+check('每組筆數正確（3 與 2）', dupMap.get('dupA-1').size === 3 && dupMap.get('dupB-1').size === 2,
+  `${dupMap.get('dupA-1').size} / ${dupMap.get('dupB-1').size}`);
+check('同內容的重複標記為 content', dupMap.get('dupA-1').type === 'content', dupMap.get('dupA-1').type);
 const extras = window.app.extraDuplicateIds(Object.values(state.labels));
 check('多餘筆數 = 3（每組保留一筆）', extras.length === 3, `${extras.join(', ')}`);
 check('多餘清單保留人工配對那筆', !extras.includes('dupA-2') && extras.includes('dupA-1') && extras.includes('dupA-3'),
@@ -137,6 +138,31 @@ check('第二組保留最新上傳的那筆', Boolean(state.labels['dupB-2']));
 check('重複數字歸零', document.getElementById('dupCount').textContent === '0');
 check('重複橫幅已隱藏', document.getElementById('dupBanner').style.display === 'none');
 
+/* ------------------------------- 3b. 同名不同檔（PDF 與轉檔後的 .wdfx） */
+console.log('\n=== 3b. 同名不同檔（PDF ↔ .wdfx）===');
+const nowIso = new Date().toISOString();
+const pairPdf = { ...makeLabel('pair-pdf', 'hash-pdf-1', '白象老母雞湯麵585克標籤_7x4'), filename: '白象老母雞湯麵585克標籤_7x4.pdf', uploadedAt: nowIso };
+const pairWdfx = { ...makeLabel('pair-wdfx', 'hash-wdfx-1', '白象老母雞湯麵585克標籤_7x4'), filename: '白象老母雞湯麵585克標籤_7x4.wdfx', kind: 'file', ext: 'wdfx', mime: 'application/octet-stream' };
+state.labels['pair-pdf'] = pairPdf;
+state.labels['pair-wdfx'] = pairWdfx;
+await db.putLabel(pairPdf);
+await db.putLabel(pairWdfx);
+window.app.renderMatchList();
+await wait(50);
+const dupMap2 = window.app.duplicateMap(Object.values(state.labels));
+check('同名不同檔會被判定為重複', Boolean(dupMap2.get('pair-pdf')) && Boolean(dupMap2.get('pair-wdfx')),
+  JSON.stringify(dupMap2.get('pair-pdf')));
+check('標記為 name（不是 content）', dupMap2.get('pair-pdf').type === 'name', dupMap2.get('pair-pdf').type);
+check('列表顯示「同名 ×2」', /同名 ×2/.test(document.getElementById('matchList').textContent));
+const extras2 = window.app.extraDuplicateIds(Object.values(state.labels));
+check('同名群組會列出一筆多餘', extras2.filter(id => id === 'pair-pdf' || id === 'pair-wdfx').length === 1,
+  extras2.join(', '));
+// 使用者選擇保留 .wdfx（因為要給 WePrint 用）
+document.querySelector('#matchList button[data-action="keep"][data-id="pair-wdfx"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(300);
+check('保留 .wdfx 後 PDF 那筆被刪除', Boolean(state.labels['pair-wdfx']) && !state.labels['pair-pdf'],
+  Object.keys(state.labels).join(', '));
+
 /* --------------------------------------------------- 4. 改標籤名稱 */
 console.log('\n=== 4. 修改標籤名稱 ===');
 window.app.openEditLabelModal('single-1');
@@ -176,8 +202,9 @@ document.getElementById('bulkDeleteBtn').dispatchEvent(new window.Event('click')
 await wait(300);
 check('兩筆都被刪除', !state.labels['extra-1'] && !state.labels['extra-2'], Object.keys(state.labels).join(', '));
 check('選取清單已清空', state.selectedLabelIds.size === 0);
-check('剩下 dupA-2 與 single-1', Object.keys(state.labels).sort().join(',') === 'dupA-2,single-1', Object.keys(state.labels).join(','));
-check('本機只剩下 2 個 Blob', (await db.blobBytes()).count === 2, `${(await db.blobBytes()).count}`);
+check('剩下 dupA-2、single-1、pair-wdfx', Object.keys(state.labels).sort().join(',') === 'dupA-2,pair-wdfx,single-1',
+  Object.keys(state.labels).join(','));
+check('本機只剩下 2 個 Blob（pair-wdfx 沒有本機檔）', (await db.blobBytes()).count === 2, `${(await db.blobBytes()).count}`);
 
 /* ------------------------------- 7. 雲端路徑（改名 / 批次刪除的請求內容） */
 console.log('\n=== 7. 有雲端時的請求內容 ===');
