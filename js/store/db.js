@@ -272,6 +272,18 @@ export async function putLabels(list, chunkSize = 20) {
   }
 }
 
+export async function clearLabels() {
+  return withTx('labels', 'readwrite', tx => {
+    tx.objectStore('labels').clear();
+  });
+}
+
+export async function clearBlobs() {
+  return withTx('blobs', 'readwrite', tx => {
+    tx.objectStore('blobs').clear();
+  }, { timeout: 60000 });
+}
+
 export async function deleteLabelRecord(id) {
   return withTx('labels', 'readwrite', tx => {
     tx.objectStore('labels').delete(id);

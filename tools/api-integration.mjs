@@ -250,6 +250,36 @@ const afterDelete = await db.prepare('SELECT COUNT(*) AS n FROM labels').first()
 const r2After = await r2.list({ prefix: 'labels/' });
 check('刪除後 D1 與 R2 都少一筆', afterDelete.n === 171 && r2After.objects.length === 171, `D1 ${afterDelete.n} / R2 ${r2After.objects.length}`);
 
+console.log('\n=== 9b. 清除雲端資料 ===');
+const clearWrong = await (await api.onRequestPost({
+  request: request('/api/cloud/clear', json({ scope: 'labels', confirm: '清' })), env
+})).json();
+check('沒有輸入正確確認字串會被拒絕', Boolean(clearWrong.error), JSON.stringify(clearWrong));
+
+const clearBadScope = await (await api.onRequestPost({
+  request: request('/api/cloud/clear', json({ scope: 'everything', confirm: '清除' })), env
+})).json();
+check('scope 不合法會被拒絕', Boolean(clearBadScope.error), JSON.stringify(clearBadScope));
+
+const leftBefore = await db.prepare('SELECT COUNT(*) AS n FROM products').first();
+const clearLabels = await (await api.onRequestPost({
+  request: request('/api/cloud/clear', json({ scope: 'labels', confirm: '清除' })), env
+})).json();
+const labelsLeft = await db.prepare('SELECT COUNT(*) AS n FROM labels').first();
+const r2Left = await r2.list({ prefix: 'labels/' });
+const productsLeft = await db.prepare('SELECT COUNT(*) AS n FROM products').first();
+const linkedLeft = await db.prepare('SELECT COUNT(*) AS n FROM products WHERE label_id IS NOT NULL').first();
+check('清除標籤：D1 標籤歸零', clearLabels.ok === true && labelsLeft.n === 0, `回報 ${clearLabels.deletedLabels}，剩 ${labelsLeft.n}`);
+check('清除標籤：R2 檔案歸零', r2Left.objects.length === 0, `剩 ${r2Left.objects.length} 個（刪了 ${clearLabels.deletedObjects}）`);
+check('清除標籤：商品沒有被刪', productsLeft.n === leftBefore.n, `${leftBefore.n} → ${productsLeft.n}`);
+check('清除標籤：商品的 label_id 已清空', linkedLeft.n === 0, `殘留 ${linkedLeft.n}`);
+
+const clearProducts = await (await api.onRequestPost({
+  request: request('/api/cloud/clear', json({ scope: 'products', confirm: '清除' })), env
+})).json();
+const productsAfter = await db.prepare('SELECT COUNT(*) AS n FROM products').first();
+check('清除商品：商品歸零', clearProducts.ok === true && productsAfter.n === 0, `回報 ${clearProducts.deletedProducts}，剩 ${productsAfter.n}`);
+
 /* 10. 未設定 binding 的友善錯誤 */
 response = await api.onRequestGet({ request: request('/api/bootstrap'), env: {} });
 check('缺少 DB binding 時回 503 與清楚訊息', response.status === 503, (await response.json()).error);

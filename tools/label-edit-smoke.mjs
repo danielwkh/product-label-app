@@ -244,6 +244,53 @@ check('送出正確的 ids', Boolean(bulkReq) && JSON.parse(bulkReq.body).ids.jo
 check('雲端標籤已從畫面移除', !state.labels['cloud-1'] && !state.labels['cloud-2']);
 state.cloudEnabled = false;
 
+/* ------------------------------- 8. 分頁順序與清除雲端資料按鈕 */
+console.log('\n=== 8. 分頁順序與清除雲端資料 ===');
+const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.trim());
+check('第一個分頁是「搜尋/掃碼」', tabs[0] === '搜尋/掃碼', tabs.join(' / '));
+check('最後一個分頁是「上傳」', tabs[tabs.length - 1] === '上傳', tabs.join(' / '));
+check('預設顯示搜尋面板', document.getElementById('panel-search').classList.contains('active'));
+check('上傳面板預設隱藏', !document.getElementById('panel-upload').classList.contains('active'));
+
+state.cloudEnabled = true;
+state.products = [{ id: 1, name: '測試商品 A' }, { id: 2, name: '測試商品 B' }];
+state.labels = {
+  'k1': makeLabel('k1', 'hash-k1', '要清掉的標籤')
+};
+window.app.renderMatchList();
+window.app.openClearCloudModal();
+check('清除視窗會顯示目前筆數', /1/.test(document.getElementById('clearCloudCounts').textContent)
+  && /2/.test(document.getElementById('clearCloudCounts').textContent),
+  document.getElementById('clearCloudCounts').textContent);
+check('確認按鈕一開始是停用的', document.getElementById('clearCloudConfirmBtn').disabled);
+const confirmInput = document.getElementById('clearCloudConfirmInput');
+confirmInput.value = '清';
+confirmInput.dispatchEvent(new window.Event('input'));
+check('輸入「清」仍不能按', document.getElementById('clearCloudConfirmBtn').disabled);
+confirmInput.value = '清除';
+confirmInput.dispatchEvent(new window.Event('input'));
+check('輸入「清除」後按鈕才啟用', !document.getElementById('clearCloudConfirmBtn').disabled);
+
+const clearCalls = [];
+globalThis.fetch = async (url, init = {}) => {
+  clearCalls.push({ url: String(url), body: init.body });
+  return new Response(JSON.stringify({ ok: true, deletedLabels: 1, deletedProducts: 0, deletedObjects: 1 }),
+    { status: 200, headers: { 'content-type': 'application/json' } });
+};
+document.getElementById('clearCloudConfirmBtn').dispatchEvent(new window.Event('click'));
+await wait(500);
+check('會呼叫 POST /api/cloud/clear', clearCalls.some(c => c.url.includes('cloud/clear')),
+  clearCalls.map(c => c.url).join(', '));
+check('送出 scope 與確認字串', (() => {
+  const call = clearCalls.find(c => c.url.includes('cloud/clear'));
+  const body = JSON.parse(call.body);
+  return body.scope === 'labels' && body.confirm === '清除';
+})(), clearCalls.find(c => c.url.includes('cloud/clear'))?.body);
+check('清除後本機標籤也清空（避免又同步回去）', Object.keys(state.labels).length === 0,
+  Object.keys(state.labels).join(', '));
+check('商品沒有被清掉', state.products.length === 2, `${state.products.length}`);
+check('視窗已關閉', !document.getElementById('clearCloudModal').classList.contains('show'));
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

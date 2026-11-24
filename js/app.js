@@ -919,6 +919,88 @@ async function renameLabel(id, rawName) {
   return true;
 }
 
+/* ------------------------------------------------- 清除雲端資料（危險操作） */
+
+function openClearCloudModal() {
+  if (!state.cloudEnabled) {
+    toast('雲端未連線，無法清除雲端資料');
+    return;
+  }
+  const labels = Object.keys(state.labels).length;
+  const products = state.products.length;
+  $('clearCloudCounts').innerHTML = `目前雲端（以畫面上的資料估算）：<b>${labels.toLocaleString()}</b> 個標籤、`
+    + `<b>${products.toLocaleString()}</b> 個商品。`;
+  $('clearCloudConfirmInput').value = '';
+  $('clearCloudConfirmBtn').disabled = true;
+  document.querySelector('input[name="clearScope"][value="labels"]').checked = true;
+  $('clearCloudModal').classList.add('show');
+}
+
+function closeClearCloudModal() {
+  $('clearCloudModal').classList.remove('show');
+  $('clearCloudConfirmInput').value = '';
+}
+
+function currentClearScope() {
+  const checked = document.querySelector('input[name="clearScope"]:checked');
+  return checked ? checked.value : 'labels';
+}
+
+async function runClearCloud() {
+  const scope = currentClearScope();
+  const typed = $('clearCloudConfirmInput').value.trim();
+  if (typed !== '清除') {
+    toast('請先輸入「清除」兩個字');
+    return;
+  }
+  const scopeText = scope === 'labels' ? '所有標籤與 PDF（商品保留）'
+    : scope === 'products' ? '所有商品（標籤與 PDF 保留）'
+      : '標籤、PDF 與商品（全部）';
+  if (!confirm(`確定要清除${scopeText}？此動作無法復原。`)) return;
+
+  const button = $('clearCloudConfirmBtn');
+  button.disabled = true;
+  button.textContent = '清除中…';
+  try {
+    const result = await api.clearCloud({ scope, confirm: typed });
+
+    // 本機一起清，避免下次同步又把舊資料傳回去
+    if (scope === 'labels' || scope === 'all') {
+      try {
+        await db.clearLabels();
+        await db.clearBlobs();
+      } catch (err) { console.warn('[clear] 本機標籤清除失敗', err); }
+      state.labels = {};
+      state.selectedLabelIds.clear();
+      for (const product of state.products) product.labelId = null;
+    }
+    if (scope === 'products' || scope === 'all') {
+      try { await db.clearProducts(); } catch (err) { console.warn('[clear] 本機商品清除失敗', err); }
+      state.products = [];
+      state.remoteProducts = null;
+    }
+    try {
+      pipeline.setProducts(state.products);
+      pipeline.setLabels(state.labels);
+      matcher.setProducts(state.products);
+      matcher.setManualLabelIds(manualLabelIdSet());
+    } catch { /* ignore */ }
+    updateStats();
+    renderMatchList();
+    closeClearCloudModal();
+
+    toast(`已清除：標籤 ${result.deletedLabels || 0}、商品 ${result.deletedProducts || 0}、檔案 ${result.deletedObjects || 0}`);
+    showStatus('cloudStatus', `雲端資料已清除（標籤 ${result.deletedLabels || 0}、商品 ${result.deletedProducts || 0}、R2 檔案 ${result.deletedObjects || 0}）`, 'warn');
+    if (window.app && typeof window.app.reloadCloud === 'function') window.app.reloadCloud();
+  } catch (err) {
+    toast(`清除失敗：${err.message}`);
+    showStatus('cloudStatus', `清除失敗：${err.message}`, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '確定清除';
+  }
+}
+
 /* ------------------------------------------------------- 編輯標籤視窗 */
 
 function openEditLabelModal(id) {
@@ -1651,6 +1733,21 @@ function bindEvents() {
     toast(`已勾選 ${extras.length} 筆多餘的重複標籤`);
   });
 
+  /* 清除雲端資料 */
+  if ($('clearCloudBtn')) $('clearCloudBtn').addEventListener('click', openClearCloudModal);
+  if ($('clearCloudCancelBtn')) $('clearCloudCancelBtn').addEventListener('click', closeClearCloudModal);
+  if ($('clearCloudConfirmBtn')) $('clearCloudConfirmBtn').addEventListener('click', runClearCloud);
+  if ($('clearCloudConfirmInput')) {
+    $('clearCloudConfirmInput').addEventListener('input', event => {
+      $('clearCloudConfirmBtn').disabled = event.target.value.trim() !== '清除';
+    });
+  }
+  if ($('clearCloudModal')) {
+    $('clearCloudModal').addEventListener('click', event => {
+      if (event.target === $('clearCloudModal')) closeClearCloudModal();
+    });
+  }
+
   /* 編輯標籤視窗 */
   $('editLabelSaveBtn').addEventListener('click', async () => {
     const id = state.editingLabelId;
@@ -1909,7 +2006,10 @@ window.app = {
   closeEditLabelModal,
   duplicateMap,
   extraDuplicateIds,
-  labelDupKey
+  labelDupKey,
+  openClearCloudModal,
+  runClearCloud,
+  closeClearCloudModal
 };
 
 boot();

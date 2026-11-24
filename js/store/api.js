@@ -113,6 +113,16 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       });
     },
 
+    /** 清除雲端資料（需輸入「清除」確認字串） */
+    async clearCloud({ scope, confirm }) {
+      return request('cloud/clear', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope, confirm }),
+        timeoutMs: 180000
+      });
+    },
+
     async bulkDeleteLabels(ids) {
       return request('labels/bulk-delete', {
         method: 'POST',

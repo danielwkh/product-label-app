@@ -385,6 +385,59 @@ export async function onRequestPost({ request, env }) {
   }
 
   /* 上傳 PDF（multipart） */
+  /* 清除雲端資料（危險操作：必須輸入「清除」才會執行） */
+  if (url.pathname.endsWith('/api/cloud/clear')) {
+    await ensureSchema(env);
+    const body = await readJson(request);
+    const scope = String((body && body.scope) || '');
+    const confirmText = String((body && body.confirm) || '').trim();
+    if (!['labels', 'products', 'all'].includes(scope)) {
+      return json({ error: 'scope 必須是 labels / products / all' }, 400);
+    }
+    if (confirmText !== '清除') {
+      return json({ error: '需要輸入「清除」兩個字才會執行' }, 400);
+    }
+
+    let deletedLabels = 0;
+    let deletedObjects = 0;
+    let deletedProducts = 0;
+
+    if (scope === 'labels' || scope === 'all') {
+      // 1) R2：先刪檔案（分批 list，避免一次拉太多）
+      if (env.LABELS) {
+        let cursor;
+        do {
+          const options = { prefix: 'labels/', limit: 1000 };
+          if (cursor) options.cursor = cursor;
+          const listed = await env.LABELS.list(options);
+          const keys = (listed.objects || []).map(object => object.key);
+          if (keys.length) {
+            await env.LABELS.delete(keys);
+            deletedObjects += keys.length;
+          }
+          cursor = listed.truncated ? listed.cursor : undefined;
+        } while (cursor);
+      }
+      // 2) D1
+      const labelCount = await env.DB.prepare('SELECT COUNT(*) AS n FROM labels').first();
+      deletedLabels = labelCount ? labelCount.n : 0;
+      if (scope === 'labels') {
+        await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ?').bind(now()).run();
+      }
+      await env.DB.prepare('DELETE FROM labels').run();
+    }
+
+    if (scope === 'products' || scope === 'all') {
+      const productCount = await env.DB.prepare('SELECT COUNT(*) AS n FROM products').first();
+      deletedProducts = productCount ? productCount.n : 0;
+      await env.DB.prepare('DELETE FROM products').run();
+    }
+
+    await bumpRevision(env, 'labels_revision');
+    await bumpRevision(env, 'products_revision');
+    return json({ ok: true, scope, deletedLabels, deletedProducts, deletedObjects });
+  }
+
   /* 批次刪除：重複標籤一次清掉，不用送幾十個 DELETE */
   if (url.pathname.endsWith('/api/labels/bulk-delete')) {
     await ensureSchema(env);

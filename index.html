@@ -69,17 +69,20 @@
 .pick-help summary{cursor:pointer;color:#2563eb;padding:6px 0}
 .pick-help ol{margin:6px 0 0 18px;line-height:1.7}
 .build-tag{margin-top:10px;font-size:.72rem;color:#94a3b8;text-align:right}
+.clear-opt{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:8px;font-size:.88rem}
+.clear-opt input{margin-top:3px}
+.clear-opt small{color:#64748b}
 </style>
 </head>
 <body>
 <header><h1>🏷️ 商品標籤助手</h1><p>上傳 → 配對 → 掃碼 → 分享到 WePrint</p></header>
 <div class="tabs">
-  <button class="tab active" data-tab="upload">上傳</button>
+  <button class="tab active" data-tab="search">搜尋/掃碼</button>
   <button class="tab" data-tab="match">配對管理</button>
-  <button class="tab" data-tab="search">搜尋/掃碼</button>
+  <button class="tab" data-tab="upload">上傳</button>
 </div>
 
-<div id="panel-upload" class="panel active">
+<div id="panel-upload" class="panel">
   <div class="card">
     <h2>☁️ 共用雲端資料</h2>
     <p style="font-size:.82rem;color:#64748b;margin-bottom:10px">啟用 Cloudflare 後，商品、配對和 PDF 可供所有同事共用。第一次請按「同步」把本機資料補上雲端（只會新增/更新，不會刪除雲端資料）。</p>
@@ -140,6 +143,7 @@
     </div>
     <div class="job-mode" id="storageInfo" style="margin-top:8px"></div>
     <button class="btn btn-danger" style="width:100%;margin-top:12px" id="clearDataBtn">清除所有本地資料</button>
+    <button class="btn btn-outline" style="width:100%;margin-top:8px" id="clearCloudBtn">🧨 清除雲端資料…</button>
   </div>
 </div>
 
@@ -186,7 +190,7 @@
   </div>
 </div>
 
-<div id="panel-search" class="panel">
+<div id="panel-search" class="panel active">
   <div class="card">
     <h2>🔍 搜尋商品</h2>
     <button class="btn btn-scan" id="scanBtn">📷 開啟相機掃描條碼</button>
@@ -209,6 +213,28 @@
     <div class="modal-search"><input type="text" id="modalSearchInput" placeholder="搜尋商品名稱或條碼..."></div>
     <div id="modalProductList" style="max-height:42dvh;overflow-y:auto"></div>
     <button class="modal-close" id="modalCloseBtn">取消</button>
+  </div>
+</div>
+
+<div class="modal-overlay" id="clearCloudModal">
+  <div class="modal">
+    <h3>🧨 清除雲端資料</h3>
+    <div class="sub" id="clearCloudCounts"></div>
+    <label class="clear-opt"><input type="radio" name="clearScope" value="labels" checked>
+      <span><b>只清除標籤與 PDF</b><br><small>商品資料（Excel 匯入的 22,481 筆）保留，只有配對連結會被清空</small></span></label>
+    <label class="clear-opt"><input type="radio" name="clearScope" value="all">
+      <span><b>全部清除</b><br><small>標籤、PDF、商品全部刪除（雲端與 R2 一起）</small></span></label>
+    <label class="clear-opt"><input type="radio" name="clearScope" value="products">
+      <span><b>只清除商品</b><br><small>保留標籤與 PDF，只刪除商品清單</small></span></label>
+    <label class="edit-field" style="margin-top:12px">
+      <span>請輸入「清除」兩個字確認（避免誤按）</span>
+      <input type="text" id="clearCloudConfirmInput" placeholder="清除" autocomplete="off">
+    </label>
+    <div class="edit-actions">
+      <button class="btn btn-danger btn-sm" id="clearCloudConfirmBtn" disabled>確定清除</button>
+      <button class="btn btn-outline btn-sm" id="clearCloudCancelBtn">取消</button>
+    </div>
+    <div class="sub" style="margin-top:10px;color:#b91c1c">此動作無法復原。建議先確認「配對管理」裡沒有還要保留的資料。</div>
   </div>
 </div>
 
