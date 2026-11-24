@@ -348,6 +348,60 @@ check('只留下 .wdfx', Object.keys(state.labels).sort().join(',') === 'w-wdfx-
   Object.keys(state.labels).join(','));
 check('按鈕在沒有 PDF 時會被停用', (() => { window.app.renderMatchList(); return document.getElementById('deletePdfBtn').disabled; })());
 
+/* ------------------------------- 11. 稍後處理（未配對壓到最後面） */
+console.log('\n=== 11. 稍後處理 ===');
+state.cloudEnabled = false;
+state.labels = {};
+const mk = (id, name, extra = {}) => ({ ...makeLabel(id, `hash-${id}`, name), ...extra });
+const deferSet = [
+  mk('d-unmatched-1', '商品庫沒有的 A'),
+  mk('d-matched', '已配對的 B', { productId: 1, matchedProductName: '已配對的 B', matchSource: 'manual' }),
+  mk('d-unmatched-2', '商品庫沒有的 C')
+];
+for (const label of deferSet) { state.labels[label.id] = label; await db.putLabel(label); }
+state.matchFilter = 'all';
+state.selectedLabelIds = new Set();
+window.app.renderMatchList();
+await wait(30);
+
+const firstIds = () => [...document.querySelectorAll('#matchList .label-item input.match-check')].map(i => i.dataset.labelId);
+check('預設排序（配對狀態）下順序固定', firstIds().length === 3, firstIds().join(','));
+
+await window.app.setDeferred(['d-unmatched-1'], true);
+await wait(120);
+const order = firstIds();
+check('延後後該筆排到最後', order[order.length - 1] === 'd-unmatched-1', order.join(','));
+check('清單顯示「已延後」標記', /已延後/.test(document.getElementById('matchList').textContent));
+check('篩選器上的延後數字是 1', document.getElementById('deferredCount').textContent === '1',
+  document.getElementById('deferredCount').textContent);
+check('未配對統計不含已延後的', /未配對 1/.test(document.getElementById('matchSummary').textContent),
+  document.getElementById('matchSummary').textContent);
+check('IndexedDB 有記住延後狀態', (await db.getLabel('d-unmatched-1')).deferred === true);
+
+// 「未配對」篩選不應包含已延後的那筆
+document.querySelector('.filter-btn[data-filter="unmatched"]').dispatchEvent(new window.Event('click'));
+await wait(50);
+check('「未配對」清單不含已延後項目', !firstIds().includes('d-unmatched-1'), firstIds().join(','));
+
+// 「已延後」篩選只看得到它
+document.querySelector('.filter-btn[data-filter="deferred"]').dispatchEvent(new window.Event('click'));
+await wait(50);
+check('「已延後」篩選只看得到延後項目', firstIds().join(',') === 'd-unmatched-1', firstIds().join(','));
+
+// 批次：把未配對的全部延後
+document.querySelector('.filter-btn[data-filter="all"]').dispatchEvent(new window.Event('click'));
+await wait(30);
+await window.app.deferAllUnmatched();
+await wait(300);
+check('一鍵延後所有未配對', state.labels['d-unmatched-1'].deferred && state.labels['d-unmatched-2'].deferred);
+check('已配對的不受影響', !state.labels['d-matched'].deferred);
+check('延後數字變成 2', document.getElementById('deferredCount').textContent === '2',
+  document.getElementById('deferredCount').textContent);
+check('取消延後可以還原', await (async () => {
+  await window.app.setDeferred(['d-unmatched-2'], false);
+  return state.labels['d-unmatched-2'].deferred === false;
+})());
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

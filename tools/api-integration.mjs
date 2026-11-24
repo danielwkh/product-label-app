@@ -213,6 +213,27 @@ await api.onRequestPatch({
 let row = await db.prepare('SELECT product_id AS pid, matched_product_name AS name FROM labels WHERE id = ?').bind(targetId).first();
 check('PATCH 可設定配對', row.pid === 1 && row.name === '測試商品', JSON.stringify(row));
 
+const deferRes = await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(targetId)}`, { method: 'PATCH', ...json({ deferred: true }) }),
+  env
+});
+const deferBody = await deferRes.json();
+row = await db.prepare('SELECT deferred, product_id AS pid, matched_product_name AS name FROM labels WHERE id = ?').bind(targetId).first();
+check('PATCH 可標記「稍後處理」且不清掉配對', deferBody.ok === true && row.deferred === 1 && row.pid === 1,
+  JSON.stringify(row));
+
+const undeferRes = await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(targetId)}`, { method: 'PATCH', ...json({ deferred: false }) }),
+  env
+});
+await undeferRes.json();
+row = await db.prepare('SELECT deferred, name_from_file AS nf FROM labels WHERE id = ?').bind(targetId).first();
+check('可以取消「稍後處理」', row.deferred === 0, JSON.stringify(row));
+
+const labelListDeferred = await (await api.onRequestGet({ request: request('/api/labels'), env })).json();
+check('/api/labels 會回傳 deferred 欄位', labelListDeferred.labels.every(l => 'deferred' in l),
+  `${labelListDeferred.labels.filter(l => l.deferred).length} 筆已延後`);
+
 const renameRes = await api.onRequestPatch({
   request: request(`/api/labels/${encodeURIComponent(targetId)}`, { method: 'PATCH', ...json({ nameFromFile: '修正後名稱' }) }),
   env

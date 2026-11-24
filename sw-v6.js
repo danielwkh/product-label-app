@@ -12,7 +12,7 @@
  *  - /api/*、非 GET、Range 請求：完全不攔截
  */
 
-const VERSION = 'v12';
+const VERSION = 'v13';
 const CACHE = `product-label-app-${VERSION}`;
 const NETWORK_TIMEOUT = 3000;
 

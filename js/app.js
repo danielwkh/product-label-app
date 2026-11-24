@@ -397,6 +397,7 @@ function mergeRemoteLabels(remoteLabels) {
       matchWhy: remote.matchWhy || null,
       uploadedAt: remote.uploadedAt || (local && local.uploadedAt) || nowISO(),
       updatedAt: remote.updatedAt || null,
+      deferred: Boolean(remote.deferred) || Boolean(local && local.deferred),
       hasLocalBlob: Boolean(local && local.hasLocalBlob),
       uploaded: true,
       remote: true
@@ -923,6 +924,71 @@ async function renameLabel(id, rawName) {
   return true;
 }
 
+/* ----------------------------------------------------- 稍後處理（延後配對） */
+
+async function setDeferred(ids, value) {
+  const targets = ids.map(id => state.labels[id]).filter(Boolean);
+  if (!targets.length) return 0;
+  const cloudBatch = [];
+  for (const label of targets) {
+    label.deferred = Boolean(value);
+    label.updatedAt = nowISO();
+    try { await db.putLabel(label); } catch (err) { console.warn('[defer] 本機更新失敗', err); }
+    if (state.cloudEnabled && label.uploaded) {
+      cloudBatch.push({
+        id: label.id,
+        productId: label.productId,
+        matchedProductName: label.matchedProductName,
+        matchSource: label.matchSource,
+        matchScore: label.matchScore,
+        matchConfidence: label.matchConfidence,
+        matchGap: label.matchGap,
+        matchWhy: label.matchWhy,
+        deferred: value
+      });
+    }
+  }
+  // 一次請求搞定（/api/labels/sync 支援 deferred），避免幾百個 PATCH
+  for (let i = 0; i < cloudBatch.length; i += 200) {
+    try {
+      await api.syncLabelMeta(cloudBatch.slice(i, i + 200));
+    } catch (err) {
+      console.warn('[defer] 雲端更新失敗（下次按同步會補）', err);
+    }
+  }
+  renderMatchList();
+  return targets.length;
+}
+
+async function deferSelected(value) {
+  const ids = [...state.selectedLabelIds];
+  if (!ids.length) {
+    toast(`請先勾選要${value ? '延後' : '取消延後'}的標籤`);
+    return;
+  }
+  const count = await setDeferred(ids, value);
+  state.selectedLabelIds.clear();
+  updateSelectionUI([]);
+  renderMatchList();
+  toast(value ? `已把 ${count} 個標籤移到最後面` : `已把 ${count} 個標籤移回清單`);
+}
+
+async function deferAllUnmatched() {
+  const ids = Object.values(state.labels)
+    .filter(label => !label.matchedProductName && !label.deferred)
+    .map(label => label.id);
+  if (!ids.length) {
+    toast('目前沒有未配對的標籤');
+    return;
+  }
+  if (!confirm(`把 ${ids.length} 個未配對的標籤全部移到清單最後面？（之後可在「⏳ 已延後」找回）`)) return;
+  const count = await setDeferred(ids, true);
+  state.matchFilter = 'unmatched';
+  document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === 'unmatched'));
+  renderMatchList();
+  toast(`已延後 ${count} 個標籤；未配對清單剩 ${Object.values(state.labels).filter(l => !l.matchedProductName && !l.deferred).length} 筆`);
+}
+
 /* --------------------------------------------------------- 格式管理（PDF / WDFX） */
 
 function formatOf(label) {
@@ -1143,7 +1209,8 @@ function renderMatchList() {
     switch (state.matchFilter) {
       case 'matched': return Boolean(l.matchedProductName);
       case 'review': return l.matchConfidence === 'review';
-      case 'unmatched': return !l.matchedProductName;
+      case 'unmatched': return !l.matchedProductName && !l.deferred;
+      case 'deferred': return Boolean(l.deferred);
       case 'dup': return dups.has(l.id);
       default: return true;
     }
@@ -1157,6 +1224,9 @@ function renderMatchList() {
     });
 
   filtered.sort((a, b) => {
+    // 「稍後處理」的標籤一律壓到最後
+    const byDefer = Number(Boolean(a.deferred)) - Number(Boolean(b.deferred));
+    if (byDefer !== 0 && state.matchSort !== 'deferred') return byDefer;
     if (state.matchFilter === 'dup') {
       // 同一組重複要排在一起，方便一眼比較
       const byGroup = labelDupKey(a).localeCompare(labelDupKey(b));
@@ -1188,9 +1258,13 @@ function renderMatchList() {
   }
 
   const dupGroups = new Set([...dups.keys()].map(id => labelDupKey(state.labels[id] || {}))).size;
+  const deferredTotal = all.filter(x => x.deferred).length;
+  const deferredCountEl = $('deferredCount');
+  if (deferredCountEl) deferredCountEl.textContent = String(deferredTotal);
   $('matchSummary').textContent = `顯示 ${filtered.length} / ${all.length} 個標籤 · 已配對 ${all.filter(x => x.matchedProductName).length}`
     + ` · 待確認 ${all.filter(x => x.matchConfidence === 'review').length}`
-    + ` · 未配對 ${all.filter(x => !x.matchedProductName).length}`
+    + ` · 未配對 ${all.filter(x => !x.matchedProductName && !x.deferred).length}`
+    + (deferredTotal ? ` · 已延後 ${deferredTotal}` : '')
     + (dupExtras.length ? ` · 重複 ${dupGroups} 組（多出 ${dupExtras.length} 筆）` : '');
 
   const dupCountEl = $('dupCount');
@@ -1232,6 +1306,7 @@ function renderMatchList() {
         ${linked ? `<span class="tag-ok">已配對：${escapeHtml(linked)}</span>` : '<span class="tag-no">未配對</span>'}
         ${manual ? '<span class="tag-warn">人工鎖定</span>' : ''}
         ${l.matchConfidence === 'review' ? '<span class="tag-warn">待確認</span>' : ''}
+        ${l.deferred ? '<span class="tag-warn">⏳ 已延後</span>' : ''}
         ${l.hasLocalBlob ? '<span class="tag-offline">本機可離線</span>' : (l.uploaded ? '<span class="tag-offline">雲端</span>' : '')}
         ${(() => { const kind = labelKind(l); const ext = (l.ext || extFromName(l.filename) || '').toUpperCase();
           if (kind === 'pdf' || !ext) return '';
@@ -1246,6 +1321,7 @@ function renderMatchList() {
              <button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">重新配對</button>`
           : `<button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">手動配對</button>`}
         <button class="btn btn-outline btn-sm" data-action="preview" data-id="${escapeHtml(l.id)}">預覽</button>
+        <button class="btn btn-outline btn-sm" data-action="${l.deferred ? 'undefer' : 'defer'}" data-id="${escapeHtml(l.id)}">${l.deferred ? '↩️ 取消延後' : '⏳ 稍後處理'}</button>
         <button class="btn btn-outline btn-sm" data-action="edit" data-id="${escapeHtml(l.id)}">✏️ 編輯</button>
         <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(l.id)}">刪除</button>
         ${dups.get(l.id) ? `<button class="btn btn-primary btn-sm" data-action="keep" data-id="${escapeHtml(l.id)}">保留這筆，刪除其他 ${dups.get(l.id).size - 1} 筆</button>` : ''}
@@ -1708,6 +1784,8 @@ function bindEvents() {
       if (action === 'preview') previewLabel(id);
       else if (action === 'match') openMatchModal(id);
       else if (action === 'unlink') unlinkLabel(id);
+      else if (action === 'defer') { setDeferred([id], true).then(() => toast('已移到清單最後面')); }
+      else if (action === 'undefer') { setDeferred([id], false).then(() => toast('已移回清單')); }
       else if (action === 'edit') openEditLabelModal(id);
       else if (action === 'delete') {
         const label = state.labels[id];
@@ -1858,6 +1936,10 @@ function bindEvents() {
     renderMatchList();
     toast(`已勾選 ${extras.length} 筆多餘的重複標籤`);
   });
+
+  /* 稍後處理 */
+  if ($('bulkDeferBtn')) $('bulkDeferBtn').addEventListener('click', () => deferSelected(true));
+  if ($('bulkUndeferBtn')) $('bulkUndeferBtn').addEventListener('click', () => deferSelected(false));
 
   /* 格式管理 */
   if ($('keepWdfxBtn')) $('keepWdfxBtn').addEventListener('click', keepOnlyWdfx);
@@ -2142,6 +2224,8 @@ window.app = {
   closeClearCloudModal,
   keepOnlyWdfx,
   deleteAllPdf,
+  setDeferred,
+  deferAllUnmatched,
   formatSummary,
   formatOf
 };

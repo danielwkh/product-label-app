@@ -108,6 +108,10 @@ async function ensureSchema(env) {
     if (!columns.has('size')) {
       await env.DB.prepare('ALTER TABLE labels ADD COLUMN size INTEGER DEFAULT 0').run();
     }
+    if (!columns.has('deferred')) {
+      // 「稍後處理」：商品資料庫還沒有這個商品時，先把標籤壓到清單最後面
+      await env.DB.prepare('ALTER TABLE labels ADD COLUMN deferred INTEGER DEFAULT 0').run();
+    }
     if (!columns.has('mime')) {
       // 支援 PDF 以外的檔案（例如 WePrint 用的 .wdfx）：記錄真正的 Content-Type
       await env.DB.prepare("ALTER TABLE labels ADD COLUMN mime TEXT DEFAULT 'application/pdf'").run();
@@ -190,7 +194,7 @@ export async function onRequestGet({ request, env, context }) {
     const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
         matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
         match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, mime, uploaded_at AS uploadedAt, updated_at AS updatedAt
+        content_hash AS hash, size, mime, deferred, uploaded_at AS uploadedAt, updated_at AS updatedAt
       FROM labels ORDER BY uploaded_at`).all();
     return json({ labels: labels.results || [], cloud: true });
   }
@@ -227,7 +231,7 @@ export async function onRequestGet({ request, env, context }) {
     const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
         matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
         match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, mime, uploaded_at AS uploadedAt, updated_at AS updatedAt
+        content_hash AS hash, size, mime, deferred, uploaded_at AS uploadedAt, updated_at AS updatedAt
       FROM labels ORDER BY uploaded_at`).all();
     const payload = {
       products: products.results || [],
@@ -345,7 +349,8 @@ export async function onRequestPost({ request, env }) {
       for (const l of group) {
         if (!l || !l.id) continue;
         statements.push(env.DB.prepare(`UPDATE labels SET product_id=?, matched_product_name=?, match_source=?,
-          match_score=?, match_confidence=?, match_gap=?, match_why=?, updated_at=? WHERE id=?`).bind(
+          match_score=?, match_confidence=?, match_gap=?, match_why=?,
+          deferred=COALESCE(?, deferred), updated_at=? WHERE id=?`).bind(
           l.productId == null ? null : Number(l.productId),
           l.matchedProductName || null,
           l.matchSource || null,
@@ -353,6 +358,7 @@ export async function onRequestPost({ request, env }) {
           l.matchConfidence || null,
           l.matchGap == null ? null : Number(l.matchGap),
           l.matchWhy || null,
+          l.deferred == null ? null : (l.deferred ? 1 : 0),
           timestamp,
           String(l.id)
         ));
@@ -571,9 +577,12 @@ export async function onRequestPatch({ request, env }) {
   const matchConfidence = pick('matchConfidence', existing.match_confidence);
   const matchGap = numberOrNull(pick('matchGap', existing.match_gap));
   const matchWhy = pick('matchWhy', existing.match_why);
+  const deferred = Object.prototype.hasOwnProperty.call(body, 'deferred')
+    ? (body.deferred ? 1 : 0)
+    : (existing.deferred ? 1 : 0);
 
   await env.DB.prepare(`UPDATE labels SET name_from_file=?, product_id=?, matched_product_name=?, match_source=?,
-      match_score=?, match_confidence=?, match_gap=?, match_why=?, updated_at=? WHERE id=?`).bind(
+      match_score=?, match_confidence=?, match_gap=?, match_why=?, deferred=?, updated_at=? WHERE id=?`).bind(
     nameFromFile == null ? null : String(nameFromFile).slice(0, 300),
     productId == null || Number.isNaN(productId) ? null : productId,
     matchedProductName || null,
@@ -582,6 +591,7 @@ export async function onRequestPatch({ request, env }) {
     matchConfidence || null,
     matchGap == null || Number.isNaN(matchGap) ? null : matchGap,
     matchWhy || null,
+    deferred,
     timestamp,
     id
   ).run();

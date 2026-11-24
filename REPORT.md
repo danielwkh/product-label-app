@@ -937,3 +937,37 @@ if (!files.length) { toast('沒有可處理的 PDF'); return; }
 測試：`tools/label-edit-smoke.mjs` **70 / 70**（新增 13 項：格式統計、孤兒判定、配對轉移、
 不覆蓋既有配對、商品 labelId 跟著搬、IndexedDB 同步、狀態列提示、按鈕停用）。
 `ui-smoke` 全數通過。`sw-v6.js` 版本 `v11 → v12`。
+
+---
+
+## 17. 「稍後處理」：商品庫還沒有的標籤壓到最後（2026-11-24）
+
+問題：使用者轉檔上傳的 `.wdfx` 有許多商品**還沒建進商品資料庫**，這些標籤在配對管理
+（尤其按「最新上傳」排序時）全擠在最前面，擋住真正要處理的項目。
+
+解法：每個標籤可以標記為 **⏳ 稍後處理**，此後：
+
+- **一律排在清單最後**（不論用哪一種排序），不會再擋在頂部；
+- 篩選器新增 **「⏳ 已延後 (N)」**，隨時可以找回；
+- **「未配對」篩選會自動排除已延後的**，讓「未配對」只顯示現在真的能處理的；
+- 統計列顯示「已延後 N」；
+- 標記狀態存在 **D1 + IndexedDB**，換裝置也看得到。
+
+操作方式：
+
+| 位置 | 動作 |
+|---|---|
+| 每一筆標籤 | **⏳ 稍後處理** / **↩️ 取消延後** |
+| 批次動作列 | **⏳ 延後所選**、**↩️ 取消延後** |
+| 程式/測試 | `window.app.deferAllUnmatched()`（把目前所有未配對一次延後，有確認視窗） |
+
+實作細節：
+
+- `schema.sql` / `migrations/0005_label_deferred.sql` 新增 `labels.deferred INTEGER DEFAULT 0`（純新增欄位，API 首次請求自動 `ALTER`）。
+- `PATCH /api/labels/:id` 支援 `deferred`（仍為部分更新，不會清掉配對）。
+- `POST /api/labels/sync` 也支援 `deferred`，所以一次延後幾百筆只需 **一個請求**（前端每 200 筆一批）。
+
+測試：`tools/api-integration.mjs` **42 / 42**（新增 3 項：PATCH deferred 不清配對、可取消、
+`/api/labels` 回傳 deferred）；`tools/label-edit-smoke.mjs` **82 / 82**（新增 12 項：
+延後後排最後、標記顯示、數字統計、未配對排除延後、已延後篩選、批次延後、取消還原、IndexedDB 持久化）。
+`ui-smoke` 全數通過；`sw-v6.js` → `v13`。
