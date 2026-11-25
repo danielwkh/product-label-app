@@ -48,7 +48,8 @@ const state = {
   editingLabelId: null,
   preview: { url: null, labelId: null, pdf: null, page: 1 },
   scanning: null,
-  blobCache: new Map()
+  blobCache: new Map(),
+  tombstones: {}               // 已刪除但雲端還沒確認的標籤 id → 刪除時間（防「刪了又復活」）
 };
 
 /* --------------------------------------------------------------- 小工具 */
@@ -380,7 +381,10 @@ function manualLabelIdSet() {
 
 function mergeRemoteLabels(remoteLabels) {
   const merged = { ...state.labels };
+  let skipped = 0;
   for (const remote of remoteLabels) {
+    // 已刪除但雲端還沒確認的 → 不要再拉回來（等墓碑清掉）
+    if (state.tombstones && state.tombstones[remote.id]) { skipped++; continue; }
     const local = merged[remote.id];
     merged[remote.id] = {
       id: remote.id,
@@ -407,6 +411,69 @@ function mergeRemoteLabels(remoteLabels) {
   for (const label of Object.values(state.labels)) {
     if (!label.uploaded) label.remote = false;
   }
+  if (skipped) console.info(`[cloud] 忽略 ${skipped} 個已刪除但雲端還沒確認的標籤`);
+  return skipped;
+}
+
+/* --------------------------------------------------- 刪除墓碑（防「復活」） */
+
+async function loadTombstones() {
+  try {
+    state.tombstones = await db.getTombstones();
+  } catch (err) {
+    console.warn('[labels] 讀取刪除紀錄失敗', err);
+    state.tombstones = {};
+  }
+  return state.tombstones;
+}
+
+async function markTombstones(ids) {
+  if (!ids.length) return;
+  try {
+    state.tombstones = await db.addTombstones(ids);
+  } catch (err) {
+    console.warn('[labels] 寫入刪除紀錄失敗', err);
+    for (const id of ids) state.tombstones[id] = nowISO();
+  }
+}
+
+async function clearTombstones(ids) {
+  if (!ids.length) return;
+  for (const id of ids) delete state.tombstones[id];
+  try {
+    state.tombstones = await db.removeTombstones(ids);
+  } catch (err) {
+    console.warn('[labels] 清除刪除紀錄失敗', err);
+  }
+}
+
+/**
+ * 把「本機已刪、雲端還沒確認」的標籤補刪掉。
+ * 每次連線／同步都會跑；成功才清墓碑，所以就算中途斷線也只會多試幾次。
+ */
+async function flushTombstones() {
+  if (!state.cloudEnabled) return 0;
+  const ids = Object.keys(state.tombstones || {});
+  if (!ids.length) return 0;
+  let confirmed = 0;
+  for (let i = 0; i < ids.length; i += 250) {
+    const chunk = ids.slice(i, i + 250);
+    try {
+      if (chunk.length === 1) await api.deleteLabel(chunk[0]);
+      else await api.bulkDeleteLabels(chunk);
+      await clearTombstones(chunk);
+      confirmed += chunk.length;
+    } catch (err) {
+      console.warn('[labels] 重試雲端刪除失敗', err);
+      const remaining = ids.length - confirmed;
+      showStatus('cloudStatus', `還有 ${remaining} 個已刪除的標籤卡在雲端：${err.message}（下次同步會再試）`, 'error');
+      break;
+    }
+  }
+  if (confirmed) {
+    renderMatchList();
+  }
+  return confirmed;
 }
 
 async function persistLocalSnapshot(products, onProgress) {
@@ -460,6 +527,7 @@ async function loadCloudData() {
         && storedProductsRev === String(meta.productsRevision);
 
       if (productsFresh) {
+        await loadTombstones();
         let labelsChanged = storedLabelsRev !== String(meta.labelsRevision);
         if (labelsChanged) {
           try {
@@ -478,6 +546,7 @@ async function loadCloudData() {
         matcher.setManualLabelIds(manualLabelIdSet());
         showStatus('cloudStatus', `已連線雲端：${state.products.length.toLocaleString()} 個商品（本機快取）、${Object.keys(state.labels).length} 個標籤`
           + `${labelsChanged ? '（已更新）' : ''}`);
+        await flushTombstones();
         return true;
       }
     }
@@ -492,6 +561,7 @@ async function loadCloudData() {
 
     // 雲端可用就先確定下來；之後本機快取寫入失敗也不應該讓它變回 false
     state.cloudEnabled = true;
+    await loadTombstones();
     state.cloudError = null;
 
     const remoteProducts = data.products || [];
@@ -638,6 +708,10 @@ async function syncAllToCloud() {
       name: p.name, barcode: p.barcode, barcode2: p.barcode2, labelId: p.labelId || null
     }]));
 
+    // 1.5) 先補刪「本機已刪、雲端還沒確認」的標籤（避免同步又把它們拉回來）
+    const flushed = await flushTombstones();
+    if (flushed) showStatus('cloudStatus', `已補刪 ${flushed} 個先前沒刪掉的標籤…`);
+
     // 2) 本機有 blob 但雲端還沒有的標籤 → 排入上傳佇列（只呼叫一次）
     const pending = Object.values(state.labels).filter(l => l.hasLocalBlob && !l.uploaded);
     let queued = 0;
@@ -678,6 +752,7 @@ async function syncAllToCloud() {
 
     const parts = [`商品 ${changed.length ? `已同步 ${changed.length.toLocaleString()} 筆` : '已是最新（無變動）'}`];
     if (queued || legacyUploaded) parts.push(`PDF 上傳 ${queued + legacyUploaded} 個`);
+    if (flushed) parts.push(`補刪 ${flushed} 個`);
     showStatus('cloudStatus', `同步完成：${parts.join('、')}`);
     toast('雲端同步完成');
   } catch (err) {
@@ -1083,17 +1158,26 @@ async function deleteLabels(ids, options = {}) {
 
   let cloudFailed = 0;
   const cloudIds = targets.filter(label => label.uploaded).map(label => label.id);
+
+  // 先記墓碑：就算雲端刪不掉，下次同步也不會把這些標籤「復活」
+  await markTombstones(cloudIds);
+
   if (state.cloudEnabled && cloudIds.length) {
+    // ⚠️ 順序很重要：先刪本機（使用者按了就要立刻消失），但雲端失敗時靠墓碑重試，
+    //    不能只 console.warn —— 以前就是這樣，同步後 PDF 又全部跑回來。
     // 伺服器一次最多 300 筆 → 這裡分批 250，避免一次請求太大
     for (let i = 0; i < cloudIds.length; i += 250) {
       const chunk = cloudIds.slice(i, i + 250);
+      const startedAt = Date.now();
       try {
         if (chunk.length === 1) await api.deleteLabel(chunk[0]);
         else await api.bulkDeleteLabels(chunk);
+        await clearTombstones(chunk);
       } catch (err) {
         cloudFailed += chunk.length;
-        console.warn('[labels] 雲端刪除失敗，僅刪除本機', err);
+        console.warn('[labels] 雲端刪除失敗，已排入重試', err, chunk.length);
       }
+      if (Date.now() - startedAt > 8000) showStatus('cloudStatus', `刪除中… 還有 ${cloudIds.length - i - chunk.length} 筆`);
     }
   }
 
@@ -1126,8 +1210,8 @@ async function deleteLabels(ids, options = {}) {
   renderMatchList();
   if (!options.silent) {
     toast(cloudFailed
-      ? `已在本機刪除 ${targets.length} 筆；雲端刪除失敗（下次連線補做）`
-      : `已刪除 ${targets.length} 個標籤`);
+      ? `本機已刪除 ${targets.length} 筆；其中 ${cloudFailed} 筆雲端未確認，已排入重試（不會復活）`
+      : `已刪除 ${targets.length} 個標籤（雲端已確認）`);
   }
   return targets.length;
 }
@@ -2395,6 +2479,14 @@ async function boot() {
   try {
     state.products = await db.getProducts();
     state.labels = await db.getLabels();
+    // 上次已刪除但雲端沒確認的 → 不要因為本機還留著記錄就顯示出來
+    await loadTombstones();
+    for (const id of Object.keys(state.tombstones)) {
+      if (state.labels[id]) {
+        try { await db.deleteLabelRecord(id); } catch { /* ignore */ }
+        delete state.labels[id];
+      }
+    }
     // 修正舊資料：商品指向不存在的標籤
     for (const product of state.products) {
       if (product.labelId && !state.labels[product.labelId]) product.labelId = null;
@@ -2463,6 +2555,9 @@ window.app = {
   deleteAllPdf,
   setDeferred,
   deferAllUnmatched,
+  flushTombstones,
+  loadTombstones,
+  clearTombstones,
   diffProducts,
   buildProductsFromRows,
   applyExcelDiff,

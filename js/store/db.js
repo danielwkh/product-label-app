@@ -394,6 +394,44 @@ export async function setMeta(key, value) {
   });
 }
 
+/* --------------------------------------------------------------- 刪除墓碑 */
+/*
+ * 為什麼需要：雲端刪除失敗（例如 D1 額度用完）時，本機已經刪掉、雲端還在，
+ * 下次同步就會把標籤「復活」。所以刪除時先記下墓碑，雲端確認後才移除，
+ * 同步時看到墓碑就跳過、並持續重試刪除。
+ */
+const TOMBSTONE_KEY = 'labelTombstones';
+const TOMBSTONE_LIMIT = 3000;
+
+export async function getTombstones() {
+  const raw = await getMeta(TOMBSTONE_KEY, null);
+  if (!raw || typeof raw !== 'object') return {};
+  return raw;
+}
+
+export async function addTombstones(ids) {
+  const current = await getTombstones();
+  const now = new Date().toISOString();
+  for (const id of ids) current[id] = now;
+  const keys = Object.keys(current);
+  if (keys.length > TOMBSTONE_LIMIT) {
+    keys.sort((a, b) => String(current[a]).localeCompare(String(current[b])));
+    for (const key of keys.slice(0, keys.length - TOMBSTONE_LIMIT)) delete current[key];
+  }
+  await setMeta(TOMBSTONE_KEY, current);
+  return current;
+}
+
+export async function removeTombstones(ids) {
+  const current = await getTombstones();
+  let changed = false;
+  for (const id of ids) {
+    if (id in current) { delete current[id]; changed = true; }
+  }
+  if (changed) await setMeta(TOMBSTONE_KEY, current);
+  return current;
+}
+
 /* ------------------------------------------------------------------- storage */
 
 export async function storageEstimate() {

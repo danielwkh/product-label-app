@@ -1043,3 +1043,53 @@ Excel 裡已移除的商品**雲端不會刪**（本機刪了，下次 bootstrap
 取消勾選刪除／沒有變動）；`api-integration` **49 / 49**（新增 7 項 products/delete）；
 `label-edit-smoke` **99 / 99**（新增 17 項比對與視窗）；`cloud-smoke`、`ui-smoke`、`filetype-smoke` 全數通過。
 `sw-v6.js` → `v15`。
+
+---
+
+## 19. 修正「刪了 PDF，同步後又出現」（2026-11-25）
+
+### 真正的成因
+
+`deleteLabels()` 刪雲端失敗時**只做了 `console.warn`**（`toast` 說「下次連線補做」，但根本沒有補做機制）：
+
+```js
+} catch (err) {
+  cloudFailed += chunk.length;
+  console.warn('[labels] 雲端刪除失敗，僅刪除本機', err);   // ← 只警告
+}
+```
+
+當時（11/24 21:14 UTC）D1 免費額度用完，**所有刪除寫入都回 500**：
+
+1. 本機記錄刪掉了 → 畫面上 PDF 消失
+2. 雲端那 127 筆還在
+3. 使用者按「同步」→ `mergeRemoteLabels()` 把雲端那 127 筆原封不動合併回來
+4. **PDF 全部復活**
+
+（44 筆「有 .wdfx 版本」的 PDF 在額度用完前就刪成功了，所以正式站現在是 127 pdf / 187 wdfx。）
+
+### 修正：刪除墓碑（tombstone）+ 自動重試
+
+- 刪除時**先**在本機記下墓碑（`meta.labelTombstones`，上限 3000 筆，IndexedDB 保存）
+- 雲端刪除**成功才清墓碑**；失敗就留著
+- `mergeRemoteLabels()` 看到墓碑 → **直接跳過**（不會復活）
+- `flushTombstones()` 在 **每次連線／每次同步**自動補刪，成功才清墓碑
+- 狀態訊息明說：「`本機已刪除 N 筆；其中 M 筆雲端未確認，已排入重試（不會復活）`」
+- 開頁時若本機還留著墓碑對應的舊記錄，會一併清掉
+
+### 測試
+
+`tools/cloud-smoke.mjs` 新增「情境 5」**9 項**，全部通過：
+
+```
+✅ 本機立刻看不到這個標籤
+✅ 有記下「刪除待確認」的墓碑
+✅ 同步後標籤沒有被拉回來（關鍵：以前會復活）
+✅ 雲端其實還沒刪掉（模擬失敗中）
+✅ 雲端恢復後會自動補刪
+✅ 雲端真的刪掉了
+✅ 墓碑清掉（不會無限重試）
+```
+
+`label-edit-smoke` 99/99、`api-integration` 49/49、`excel-diff-smoke` 24/24、
+`ui-smoke`、`filetype-smoke` 全數通過。`sw-v6.js` → `v16`。

@@ -47,7 +47,9 @@ const remoteLabels = [
   }
 ];
 
-const calls = { bootstrap: 0, meta: 0, labelList: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0 };
+const calls = { bootstrap: 0, meta: 0, labelList: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0, bulkDelete: 0, singleDelete: 0 };
+let failDelete = false;
+let cloudLabels = remoteLabels.map(l => ({ ...l }));
 let productsRevision = '1';
 let labelsRevision = '1';
 let bootstrapDelay = 0;
@@ -69,14 +71,30 @@ globalThis.fetch = async (url, options = {}) => {
   if (target.includes('/api/labels') && (!options.method || options.method === 'GET')) {
     calls.labelList++;
     if (failBootstrap) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
-    return json({ labels: remoteLabels, cloud: true });
+    return json({ labels: cloudLabels, cloud: true });
+  }
+  if (target.includes('/api/labels/bulk-delete')) {
+    calls.bulkDelete++;
+    if (failDelete) return json({ error: 'D1_ERROR: Your account has exceeded D1 free tier' }, 500);
+    const ids = (JSON.parse(options.body || '{}').ids) || [];
+    cloudLabels = cloudLabels.filter(l => !ids.includes(l.id));
+    labelsRevision = String(Number(labelsRevision) + 1);
+    return json({ ok: true, deleted: ids.length, ids });
+  }
+  if (/\/api\/labels\/[^/]+$/.test(target) && options.method === 'DELETE') {
+    calls.singleDelete++;
+    if (failDelete) return json({ error: 'D1_ERROR: Your account has exceeded D1 free tier' }, 500);
+    const id = decodeURIComponent(target.split('/api/labels/')[1]);
+    cloudLabels = cloudLabels.filter(l => l.id !== id);
+    labelsRevision = String(Number(labelsRevision) + 1);
+    return json({ ok: true, deleted: 1, ids: [id] });
   }
   if (target.includes('/api/bootstrap')) {
     calls.bootstrap++;
     if (bootstrapDelay) await new Promise(r => setTimeout(r, bootstrapDelay));
     if (failBootstrap) return json({ error: 'D1 binding DB is not configured' }, 503);
     return json({
-      products: remoteProducts, labels: remoteLabels, cloud: true, version: 2,
+      products: remoteProducts, labels: cloudLabels, cloud: true, version: 2,
       revision: `${productsRevision}.${labelsRevision}`, productsRevision, labelsRevision
     });
   }
@@ -218,6 +236,36 @@ await new Promise(r => setTimeout(r, 300));
 check('回報「無法連線雲端」並附原因', /無法連線雲端/.test(statusText()) && /D1 binding/.test(statusText()), statusText());
 check('state.cloudEnabled = false', window.app.state.cloudEnabled === false);
 failBootstrap = false;
+
+/* ------------------------- 情境 5：雲端刪除失敗時，標籤不可以「刪了又復活」 */
+
+console.log('\n=== 情境 5：刪除 PDF → 雲端失敗 → 同步後不可復活 ===');
+failBootstrap = false;
+await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 400));
+const victimId = Object.keys(window.app.state.labels)[0];
+check('測試前雲端與本機都有這個標籤', Boolean(window.app.state.labels[victimId]));
+
+failDelete = true;                                     // 模擬 D1 額度用完 → 刪除失敗
+await window.app.deleteLabels([victimId]);
+await new Promise(r => setTimeout(r, 300));
+check('本機立刻看不到這個標籤', !window.app.state.labels[victimId]);
+check('有記下「刪除待確認」的墓碑', Boolean(window.app.state.tombstones[victimId]));
+check('狀態訊息說明雲端尚未確認', /重試|未確認/.test(document.getElementById('toast').textContent)
+  || /重試|未確認/.test(statusText()), document.getElementById('toast').textContent);
+
+await window.app.reloadCloud();                        // 使用者按「同步」/重開頁
+await new Promise(r => setTimeout(r, 600));
+check('同步後標籤沒有被拉回來（關鍵：以前會復活）', !window.app.state.labels[victimId],
+  Object.keys(window.app.state.labels).join(','));
+check('雲端其實還沒刪掉（模擬失敗中）', cloudLabels.some(l => l.id === victimId));
+
+failDelete = false;                                    // 雲端恢復
+const flushed = await window.app.flushTombstones();
+await new Promise(r => setTimeout(r, 200));
+check('雲端恢復後會自動補刪', flushed >= 1, `補刪 ${flushed} 筆`);
+check('雲端真的刪掉了', !cloudLabels.some(l => l.id === victimId), cloudLabels.map(l => l.id).join(','));
+check('墓碑清掉（不會無限重試）', !window.app.state.tombstones[victimId]);
 
 console.log(`\n=== 結果：${failures === 0 ? '全部通過' : `${failures} 項失敗`} ===`);
 await db.deleteDatabase();
