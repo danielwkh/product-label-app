@@ -477,6 +477,101 @@ check('沒有差異時不顯示刪除選項', document.getElementById('excelDiff
 check('沒有差異時按鈕只說「知道了」', document.getElementById('excelDiffConfirm').textContent === '知道了',
   document.getElementById('excelDiffConfirm').textContent);
 
+/* ------------------------------- 13. 備份／匯出／配對診斷 */
+console.log('\n=== 13. 備份／匯出／診斷 ===');
+
+// 準備：2 個商品、1 個已配對、1 個未配對（未配對的名稱故意接近某商品）
+state.products = [
+  { id: 901, name: '達利園瑞士卷草莓味 240g', barcode: '6900000000001', barcode2: '', labelId: null },
+  { id: 902, name: '佳得樂檸檬味運動飲料 600ml', barcode: '6900000000002', barcode2: '', labelId: null }
+];
+state.labels = {
+  'x-matched': makeLabel('x-matched', 'hash-x1', '達利園瑞士卷草莓味_標籤_7x4cm', {
+    productId: 901, matchedProductName: '達利園瑞士卷草莓味 240g', matchSource: 'manual', uploaded: true
+  }),
+  'x-unmatched': makeLabel('x-unmatched', 'hash-x2', '佳得樂檸檬味運動飲料_標籤_7x4cm', { uploaded: true }),
+  'x-orphan': makeLabel('x-orphan', 'hash-x3', 'Tdmigo巧克力抹茶味威化餅乾_標籤_7x4cm', { uploaded: true })
+};
+state.cloudEnabled = false;
+state.matchIndex = null;
+window.app.renderMatchList();
+
+const downloads = [];
+const originalCreate = window.URL.createObjectURL;
+const originalCreateGlobal = globalThis.URL.createObjectURL;
+const capture = blob => { downloads.push(blob); return 'blob:mock'; };
+window.URL.createObjectURL = capture;
+globalThis.URL.createObjectURL = capture;
+window.URL.revokeObjectURL = () => {};
+globalThis.URL.revokeObjectURL = () => {};
+const anchorClicks = [];
+const originalClick = window.HTMLAnchorElement.prototype.click;
+window.HTMLAnchorElement.prototype.click = function () { anchorClicks.push(this.download); };
+
+// 1) 未配對清單 CSV
+const unmatchedCount = window.app.exportUnmatchedCsv();
+await wait(50);
+check('匯出未配對清單：筆數正確（2 筆）', unmatchedCount === 2, String(unmatchedCount));
+const csvBytes = new Uint8Array(await downloads[downloads.length - 1].arrayBuffer());
+check('CSV 有 UTF-8 BOM（Excel 中文不亂碼）',
+  csvBytes[0] === 0xef && csvBytes[1] === 0xbb && csvBytes[2] === 0xbf,
+  [...csvBytes.slice(0, 3)].map(b => b.toString(16)).join(' '));
+const csvText = await downloads[downloads.length - 1].text();
+check('CSV 指出「佳得樂」最接近的商品', /佳得樂檸檬味運動飲料 600ml/.test(csvText),
+  csvText.split('\r\n')[1] || '');
+check('匯出檔案有下載動作', anchorClicks.length >= 1 && /未配對清單_/.test(anchorClicks[anchorClicks.length - 1]),
+  anchorClicks[anchorClicks.length - 1] || '');
+
+// 2) 配對診斷
+const diag = window.app.exportDiagnostics();
+await wait(50);
+check('診斷：2 筆未配對', diag.unmatched === 2, JSON.stringify(diag));
+check('診斷：無關的標籤被歸類為「找不到接近商品」', diag.noCandidate === 1, JSON.stringify(diag));
+const diagText = await downloads[downloads.length - 1].text();
+check('診斷報告含分數與原因', /分數|名稱相同|關鍵詞/.test(diagText), diagText.split('\r\n')[1] || '');
+check('診斷報告給出可行動的判斷', /請人工確認|分數太低|商品庫可能沒有|可自動配對/.test(diagText),
+  diagText.split('\r\n').slice(1).map(l => l.split(',').pop()).join(' / '));
+
+// 3) 單一標籤診斷 API
+const single = window.app.diagnoseLabel(state.labels['x-unmatched']);
+check('diagnoseLabel 回傳最接近的商品', Boolean(single) && single.product.id === 902,
+  single ? `${single.product.name} (${Math.round(single.score)} 分 ${single.confidence})` : 'null');
+check('診斷有說明原因', Boolean(single) && single.why.length > 0, single ? single.why.join('、') : '');
+
+// 4) JSON 備份
+const backupCount = window.app.exportJsonBackup();
+await wait(50);
+check('JSON 備份：標籤筆數正確', backupCount === 3, String(backupCount));
+const backup = JSON.parse(await downloads[downloads.length - 1].text());
+check('JSON 備份含商品與標籤', backup.products.length === 2 && backup.labels.length === 3,
+  `${backup.products.length} / ${backup.labels.length}`);
+check('JSON 備份含配對資訊', backup.labels.some(l => l.productId === 901 && l.matchedProductName),
+  JSON.stringify(backup.labels.find(l => l.id === 'x-matched') || {}));
+check('JSON 備份有格式標記與版本', backup.format === 'product-label-app-backup' && backup.version === 1);
+
+// 5) Excel 匯出（需要 XLSX）
+if (window.XLSX) {
+  const rows = window.app.exportExcel();
+  await wait(100);
+  check('Excel 匯出：每筆商品一列', rows === 2, String(rows));
+  check('Excel 檔名正確', /商品配對備份_/.test(anchorClicks[anchorClicks.length - 1]),
+    anchorClicks[anchorClicks.length - 1] || '');
+} else {
+  check('Excel 匯出（測試環境無 XLSX，略過）', true, 'skipped');
+}
+
+// 6) 工具視窗
+window.app.openToolsModal();
+check('工具視窗會打開', document.getElementById('toolsModal').classList.contains('show'));
+check('工具視窗顯示統計', /商品 2/.test(document.getElementById('toolsStatus').textContent),
+  document.getElementById('toolsStatus').textContent);
+document.getElementById('toolsCloseBtn').dispatchEvent(new window.Event('click'));
+check('工具視窗可關閉', !document.getElementById('toolsModal').classList.contains('show'));
+
+window.URL.createObjectURL = originalCreate;
+globalThis.URL.createObjectURL = originalCreateGlobal;
+window.HTMLAnchorElement.prototype.click = originalClick;
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

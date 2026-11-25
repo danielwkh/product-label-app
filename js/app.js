@@ -1512,6 +1512,189 @@ async function deleteAllPdf() {
   showStatus('pdfStatus', `已刪除 ${removed} 個 PDF 標籤；目前標籤 ${Object.keys(state.labels).length} 筆`, 'warn');
 }
 
+/* ------------------------------------------------------- 備份／匯出／診斷 */
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* ignore */ } }, 5000);
+}
+
+function timestampForFile() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
+/** 商品 + 配對現況（給同事看的 Excel） */
+function buildExportRows() {
+  const labelsByProduct = new Map();
+  for (const label of Object.values(state.labels)) {
+    if (label.productId == null) continue;
+    if (!labelsByProduct.has(Number(label.productId))) labelsByProduct.set(Number(label.productId), label);
+  }
+  return state.products.map(product => {
+    const label = labelsByProduct.get(Number(product.id));
+    return {
+      商品名稱: product.name,
+      條碼: product.barcode || '',
+      第二條碼: product.barcode2 || '',
+      有標籤: label ? '是' : '否',
+      標籤名稱: label ? (label.nameFromFile || label.filename) : '',
+      標籤檔名: label ? label.filename : '',
+      配對方式: label ? (label.matchSource === 'manual' ? '人工' : label.matchSource || '') : '',
+      信心: label ? (label.matchConfidence || '') : ''
+    };
+  });
+}
+
+function exportExcel() {
+  if (!state.products.length) throw new Error('本機沒有商品資料，請先上傳 Excel');
+  const rows = buildExportRows();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), '商品與配對');
+  const unmatched = Object.values(state.labels).filter(l => !l.matchedProductName);
+  if (unmatched.length) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unmatched.map(l => ({
+      標籤名稱: l.nameFromFile || l.filename,
+      檔名: l.filename,
+      格式: (formatOf(l) || '').toUpperCase(),
+      已延後: l.deferred ? '是' : '否',
+      上傳時間: l.uploadedAt || ''
+    }))), '未配對標籤');
+  }
+  const buffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    `商品配對備份_${timestampForFile()}.xlsx`);
+  return rows.length;
+}
+
+function exportJsonBackup() {
+  const payload = {
+    format: 'product-label-app-backup',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    productCount: state.products.length,
+    labelCount: Object.keys(state.labels).length,
+    products: state.products.map(p => ({ id: p.id, name: p.name, barcode: p.barcode || '', barcode2: p.barcode2 || '' })),
+    labels: Object.values(state.labels).map(l => ({
+      id: l.id, filename: l.filename, nameFromFile: l.nameFromFile, hash: l.hash || null,
+      size: l.size || 0, ext: l.ext || null, uploadedAt: l.uploadedAt || null,
+      productId: l.productId ?? null, matchedProductName: l.matchedProductName || null,
+      matchSource: l.matchSource || null, matchConfidence: l.matchConfidence || null,
+      matchScore: l.matchScore ?? null, deferred: Boolean(l.deferred), uploaded: Boolean(l.uploaded)
+    }))
+  };
+  downloadBlob(new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' }),
+    `完整備份_${timestampForFile()}.json`);
+  return payload.labels.length;
+}
+
+function toCsv(rows) {
+  const escape = value => {
+    const text = value == null ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return rows.map(row => row.map(escape).join(',')).join('\r\n');
+}
+
+function exportUnmatchedCsv() {
+  const rows = [['標籤名稱', '檔名', '格式', '已延後', '上傳時間', '最接近的商品', '相似度分數', '信心', '原因']];
+  for (const label of Object.values(state.labels)) {
+    if (label.matchedProductName) continue;
+    const best = diagnoseLabel(label);
+    rows.push([
+      label.nameFromFile || label.filename,
+      label.filename,
+      (formatOf(label) || '').toUpperCase(),
+      label.deferred ? '是' : '否',
+      label.uploadedAt || '',
+      best ? best.product.name : '',
+      best ? Math.round(best.score) : '',
+      best ? best.confidence : '',
+      best ? best.why.join('、') : '沒有任何接近的商品'
+    ]);
+  }
+  downloadBlob(new Blob(['\ufeff' + toCsv(rows)], { type: 'text/csv;charset=utf-8' }),
+    `未配對清單_${timestampForFile()}.csv`);
+  return rows.length - 1;
+}
+
+/** 對單一標籤做配對診斷：最接近的兩個商品與原因 */
+function diagnoseLabel(label) {
+  const name = `${label.nameFromFile || label.filename || ''}`;
+  try {
+    const result = matchFileName(state.matchIndex || buildIndex(state.products), name, {
+      manualLabelIds: manualLabelIdSet(),
+      currentLabelId: label.id
+    });
+    if (!result) return null;
+    return {
+      product: { id: result.product.id, name: result.product.name },
+      score: result.score,
+      confidence: result.confidence,
+      why: result.why || [],
+      second: result.secondBest
+        ? { name: result.secondBest.product.name, score: Math.round(result.secondBest.score) }
+        : null,
+      gap: Math.round(result.gap || 0)
+    };
+  } catch (err) {
+    console.warn('[diagnose] 失敗', label.id, err);
+    return null;
+  }
+}
+
+function exportDiagnostics() {
+  const rows = [['標籤名稱', '目前狀態', '最接近的商品', '分數', '信心', '與第二名的差距', '原因', '第二名商品', '第二名分數', '判斷']];
+  let unmatched = 0;
+  let noCandidate = 0;
+  for (const label of Object.values(state.labels)) {
+    if (label.matchedProductName) continue;
+    unmatched++;
+    const best = diagnoseLabel(label);
+    if (!best) noCandidate++;
+    rows.push([
+      label.nameFromFile || label.filename,
+      label.deferred ? '已延後' : '未配對',
+      best ? best.product.name : '',
+      best ? Math.round(best.score) : 0,
+      best ? best.confidence : '',
+      best ? best.gap : '',
+      best ? best.why.join('、') : '',
+      best && best.second ? best.second.name : '',
+      best && best.second ? best.second.score : '',
+      !best ? '商品庫可能沒有這支商品'
+        : best.confidence === 'high' ? '可自動配對（按「重新配對」）'
+          : best.confidence === 'review' ? '請人工確認'
+            : '分數太低，建議手動配對'
+    ]);
+  }
+  downloadBlob(new Blob(['\ufeff' + toCsv(rows)], { type: 'text/csv;charset=utf-8' }),
+    `配對診斷_${timestampForFile()}.csv`);
+  return { unmatched, noCandidate };
+}
+
+function openToolsModal() {
+  const modal = $('toolsModal');
+  if (!modal) return;
+  const pending = pendingCount();
+  $('toolsStatus').textContent = `商品 ${state.products.length.toLocaleString()} 筆、標籤 ${Object.keys(state.labels).length} 筆`
+    + `、未配對 ${Object.values(state.labels).filter(l => !l.matchedProductName).length} 筆`
+    + (pending ? `、待上傳 ${pending} 筆` : '');
+  modal.classList.add('show');
+}
+
+function closeToolsModal() {
+  const modal = $('toolsModal');
+  if (modal) modal.classList.remove('show');
+}
+
 /* ------------------------------------------------- 清除雲端資料（危險操作） */
 
 function openClearCloudModal() {
@@ -2357,6 +2540,50 @@ function bindEvents() {
     toast(`已勾選 ${extras.length} 筆多餘的重複標籤`);
   });
 
+  /* 備份／診斷 */
+  if ($('toolsBtn')) $('toolsBtn').addEventListener('click', openToolsModal);
+  if ($('toolsCloseBtn')) $('toolsCloseBtn').addEventListener('click', closeToolsModal);
+  if ($('toolsModal')) {
+    $('toolsModal').addEventListener('click', async event => {
+      const btn = event.target.closest('button[data-tool]');
+      if (!btn) return;
+      const tool = btn.dataset.tool;
+      const status = $('toolsStatus');
+      btn.disabled = true;
+      try {
+        if (tool === 'excel') {
+          status.textContent = `已匯出 ${exportExcel().toLocaleString()} 筆商品`;
+        } else if (tool === 'json') {
+          status.textContent = `已匯出完整備份（${exportJsonBackup()} 筆標籤）`;
+        } else if (tool === 'unmatched') {
+          status.textContent = `已匯出 ${exportUnmatchedCsv()} 筆未配對標籤`;
+        } else if (tool === 'rematch') {
+          const total = Object.values(state.labels).filter(l => !l.deferred).length;
+          if (!confirm(`用新的比對規則（忽略重量／容量）重新配對 ${total} 個標籤？\n人工配對的項目不會被覆蓋。`)) {
+            status.textContent = '已取消';
+            return;
+          }
+          status.textContent = '重新配對中…';
+          await pipeline.rematchAll();
+          await refreshStateFromPipeline();
+          await markLabelDirty(Object.values(state.labels).filter(l => l.uploaded).map(l => l.id));
+          if (state.cloudEnabled) await syncMatchMetadata();
+          const matched = Object.values(state.labels).filter(l => l.matchedProductName).length;
+          const review = Object.values(state.labels).filter(l => l.matchConfidence === 'review').length;
+          status.textContent = `重新配對完成：已配對 ${matched} 筆（待確認 ${review} 筆）`;
+          toast(`已重新配對：${matched} 筆有配對`);
+        } else if (tool === 'diagnose') {
+          const { unmatched, noCandidate } = exportDiagnostics();
+          status.textContent = `診斷完成：${unmatched} 筆未配對，其中 ${noCandidate} 筆在商品庫找不到接近的商品`;
+        }
+      } catch (err) {
+        status.textContent = `失敗：${err.message}`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
   /* 稍後處理 */
   if ($('bulkDeferBtn')) $('bulkDeferBtn').addEventListener('click', () => deferSelected(true));
   if ($('bulkUndeferBtn')) $('bulkUndeferBtn').addEventListener('click', () => deferSelected(false));
@@ -2664,6 +2891,12 @@ window.app = {
   loadPendingLabelSync,
   markLabelDirty,
   pendingCount,
+  exportExcel,
+  exportJsonBackup,
+  exportUnmatchedCsv,
+  exportDiagnostics,
+  diagnoseLabel,
+  openToolsModal,
   diffProducts,
   buildProductsFromRows,
   applyExcelDiff,

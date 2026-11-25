@@ -74,6 +74,8 @@
 .clear-opt small{color:#64748b}
 .format-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
 .format-row .btn{width:auto;flex:1 1 45%}
+.tools-list{display:flex;flex-direction:column;gap:8px;margin:14px 0}
+.tools-list .btn{width:100%;text-align:left}
 .diff-counts{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
 .diff-chip{font-size:13px;padding:4px 10px;border-radius:999px;background:#f1f5f9;color:#334155}
 .diff-chip.add{background:#dcfce7;color:#166534}
@@ -181,6 +183,7 @@
     </div>
     <div id="matchSummary" class="match-summary"></div>
     <div class="format-row">
+      <button class="btn btn-outline" id="toolsBtn">🧰 備份／診斷</button>
       <button class="btn btn-outline btn-sm" id="keepWdfxBtn">🧹 每組只保留 .WDFX</button>
       <button class="btn btn-danger btn-sm" id="deletePdfBtn">🗑 刪除所有 PDF</button>
     </div>
@@ -233,6 +236,24 @@
     <div class="modal-search"><input type="text" id="modalSearchInput" placeholder="搜尋商品名稱或條碼..."></div>
     <div id="modalProductList" style="max-height:42dvh;overflow-y:auto"></div>
     <button class="modal-close" id="modalCloseBtn">取消</button>
+  </div>
+</div>
+
+<div class="modal-overlay" id="toolsModal">
+  <div class="modal">
+    <h3>🧰 備份／診斷</h3>
+    <div class="sub">備份只包含資料（商品、配對、檔名），檔案本體仍在雲端 R2。</div>
+    <div class="tools-list">
+      <button class="btn btn-outline btn-sm" data-tool="excel">📊 匯出 Excel（商品 + 配對現況）</button>
+      <button class="btn btn-outline btn-sm" data-tool="json">🗄 匯出 JSON 完整備份</button>
+      <button class="btn btn-outline btn-sm" data-tool="unmatched">📝 匯出未配對清單（CSV）</button>
+      <button class="btn btn-outline btn-sm" data-tool="diagnose">🔍 配對診斷報告（為什麼配不上）</button>
+      <button class="btn btn-primary btn-sm" data-tool="rematch">🎯 用新引擎重新配對全部標籤</button>
+    </div>
+    <div class="sub" id="toolsStatus"></div>
+    <div class="edit-actions">
+      <button class="btn btn-outline btn-sm" id="toolsCloseBtn">關閉</button>
+    </div>
   </div>
 </div>
 

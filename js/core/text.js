@@ -131,3 +131,44 @@ export function bigramsOf(text) {
 export function looksLikeCJK(s) {
   return CJK.test(s);
 }
+
+/* ------------------------------------------------------------------ 重量／容量 */
+/*
+ * 為什麼要處理：使用者的標籤檔名常常「沒有寫重量」，而 Excel 商品名稱有寫。
+ *   標籤：達利園瑞士卷草莓味_標籤_7x4cm
+ *   商品：達利園瑞士卷草莓味 240g
+ * 逐字比對永遠配不上，所以配對時要能把「240g / 600ml / 105克 / 300+20g / 88g(11gx8)」
+ * 當成可忽略的資訊；但**兩邊都寫了不同重量**時要視為不同規格，不能亂配。
+ */
+
+const UNIT = '(?:kg|g|mg|克|公斤|ml|毫升|l|oz|lb|磅|包|罐|瓶|盒|支|片|粒|入)';
+const SIZE_RE = new RegExp(`\\d+(?:\\.\\d+)?(?:\\s*[+＋]\\s*\\d+(?:\\.\\d+)?)?\\s*${UNIT}(?:\\s*[x×*]\\s*\\d+(?:\\.\\d+)?\\s*${UNIT})?`, 'gi');
+const NESTED_SIZE_RE = new RegExp(`[（(]\\s*\\d+(?:\\.\\d+)?\\s*${UNIT}\\s*[x×*]\\s*\d+\s*[)）]`, 'gi');
+
+/** 取出字串中的重量／容量（例如 ['240g', '600ml']），可用於比對規格是否相同。 */
+export function sizesOf(s) {
+  const text = String(s ?? '').normalize('NFKC');
+  const found = text.match(SIZE_RE) || [];
+  return found.map(x => x.replace(/\s+/g, '').toLowerCase());
+}
+
+/** 標籤尺寸等「與商品無關」的雜訊（_標籤_7x4cm、7x4、(1)、x8 殘留） */
+const LABEL_NOISE_RE = /(?:標[籤签])?[\s_\-]*7\s*[x×*]\s*4\s*(?:cm|CM)?|(?<![0-9])[x×*]\s*\d{1,3}(?![0-9])|[（(]\s*\d+\s*[)）]/gi;
+
+/** 去掉重量／容量與標籤尺寸後的 compact 形式（用於「忽略重量」的名稱比對）。 */
+export function compactWithoutSize(s) {
+  let text = String(s ?? '').normalize('NFKC');
+  text = text.replace(NESTED_SIZE_RE, ' ');
+  text = text.replace(SIZE_RE, ' ');
+  text = text.replace(LABEL_NOISE_RE, ' ');
+  const compacted = compact(text);
+  return compacted || compact(s);
+}
+
+/** 兩邊的規格是否衝突：都有寫、但沒有一個共同的重量/容量。 */
+export function sizeConflict(a, b) {
+  const sa = sizesOf(a);
+  const sb = sizesOf(b);
+  if (!sa.length || !sb.length) return false;
+  return !sa.some(x => sb.includes(x));
+}
