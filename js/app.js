@@ -50,7 +50,8 @@ const state = {
   scanning: null,
   blobCache: new Map(),
   tombstones: {},              // 已刪除但雲端還沒確認的標籤 id → 刪除時間（防「刪了又復活」）
-  pendingLabelSync: new Set()  // 改名／配對改了但雲端還沒確認的標籤 id → 下次同步補送
+  pendingLabelSync: new Set(), // 改名／配對改了但雲端還沒確認的標籤 id → 下次同步補送
+  scanRecent: []               // 掃碼台「最近掃過」
 };
 
 /* --------------------------------------------------------------- 小工具 */
@@ -1512,6 +1513,230 @@ async function deleteAllPdf() {
   showStatus('pdfStatus', `已刪除 ${removed} 個 PDF 標籤；目前標籤 ${Object.keys(state.labels).length} 筆`, 'warn');
 }
 
+/* ------------------------------------------------------------------ 掃碼台 */
+/*
+ * 日常用法：掃描槍／相機掃商品條碼 → 直接出這支商品的標籤 → WePrint。
+ * 搜尋範圍刻意只限「有標籤的商品」（通常幾百個），而不是 22,481 個商品，
+ * 也不會去搜整個檔案庫，所以掃一下就只有一個答案。
+ */
+
+const SCAN_RECENT_LIMIT = 12;
+
+function labelsByProductId() {
+  const map = new Map();
+  for (const label of Object.values(state.labels)) {
+    if (label.productId == null) continue;
+    const id = Number(label.productId);
+    const current = map.get(id);
+    // 同一個商品若有多個標籤，優先顯示已上傳、有檔案的
+    if (!current || (label.uploaded && !current.uploaded)) map.set(id, label);
+  }
+  return map;
+}
+
+function labelForProduct(productId) {
+  return labelsByProductId().get(Number(productId)) || null;
+}
+
+/** 依條碼找商品：先找完整條碼，再找尾 6 碼（必須唯一）。 */
+function findProductByCode(code) {
+  const value = String(code || '').trim();
+  const digitsOnly = value.replace(/\D/g, '');
+  if (!digitsOnly) return null;
+  const exact = state.products.find(product =>
+    [product.barcode, product.barcode2].some(b => b && String(b).replace(/\D/g, '') === digitsOnly));
+  if (exact) return { product: exact, by: 'barcode' };
+
+  if (digitsOnly.length >= 4) {
+    const tail = digitsOnly.slice(-6);
+    const hits = state.products.filter(product =>
+      [product.barcode, product.barcode2].some(b => b && String(b).replace(/\D/g, '').endsWith(tail)));
+    if (hits.length === 1) return { product: hits[0], by: 'tail6' };
+    if (hits.length > 1) return { product: null, by: 'ambiguous', hits: hits.slice(0, 12) };
+  }
+  return null;
+}
+
+/** 用名稱找「有標籤的商品」（掃碼台只搜這批）。 */
+function findLabeledProductsByName(query) {
+  const q = compact(query);
+  if (!q) return [];
+  const byProduct = labelsByProductId();
+  const out = [];
+  for (const product of state.products) {
+    if (!byProduct.has(Number(product.id))) continue;
+    if (compact(product.name).includes(q)) out.push(product);
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+function scanDeskEmpty() {
+  const card = $('scanDeskCard');
+  if (!card) return;
+  card.className = 'scan-card empty';
+  card.innerHTML = '<div class="scan-empty">等待掃描…<br><small>用掃描槍／條碼機時，數字會自動打進來</small></div>';
+}
+
+function scanDeskShowProduct(product, extra = '') {
+  const card = $('scanDeskCard');
+  if (!card) return;
+  const label = labelForProduct(product.id);
+  if (!label) {
+    card.className = 'scan-card warn';
+    card.innerHTML = `
+      <div class="scan-warn-title">⚠️ 這支商品還沒有標籤</div>
+      <div class="scan-meta">${escapeHtml(product.name)}${product.barcode ? ` · ${escapeHtml(product.barcode)}` : ''}</div>
+      <div class="scan-warn-body">商品庫找得到這支商品，但還沒有對應的標籤檔案。<br>請上傳這支的標籤（或用「配對管理」手動配對）。</div>
+      <div class="scan-actions">
+        <button class="btn btn-primary" data-scan-action="upload">⬆️ 上傳標籤</button>
+        <button class="btn" data-scan-action="match">🔗 去配對管理</button>
+      </div>`;
+    return;
+  }
+  const ext = (formatOf(label) || '').toUpperCase();
+  card.className = 'scan-card';
+  card.innerHTML = `
+    <div class="scan-name">${escapeHtml(product.name)}</div>
+    <div class="scan-meta">${product.barcode ? `條碼 ${escapeHtml(product.barcode)}` : ''}${extra ? ` · ${escapeHtml(extra)}` : ''}</div>
+    <div class="scan-label">📄 ${escapeHtml(label.nameFromFile || label.filename)} <b>${ext}</b></div>
+    <div class="scan-actions">
+      <button class="btn" data-scan-action="preview" data-id="${escapeHtml(label.id)}">👁 預覽</button>
+      <button class="btn btn-primary" data-scan-action="share" data-id="${escapeHtml(label.id)}">🖨 WePrint</button>
+      <button class="btn" data-scan-action="download" data-id="${escapeHtml(label.id)}">⬇ 下載</button>
+    </div>`;
+  pushScanRecent({ code: product.barcode || '', name: product.name, productId: product.id });
+}
+
+function scanDeskNotFound(code) {
+  const card = $('scanDeskCard');
+  if (!card) return;
+  card.className = 'scan-card warn';
+  card.innerHTML = `
+    <div class="scan-warn-title">❓ 商品庫沒有這個條碼</div>
+    <div class="scan-meta">${escapeHtml(code)}</div>
+    <div class="scan-warn-body">商品資料庫沒有這個條碼，可能是新商品還沒加進 Excel，或條碼打錯。</div>
+    <div class="scan-actions">
+      <button class="btn btn-primary" data-scan-action="upload">⬆️ 上傳標籤</button>
+    </div>`;
+}
+
+/** 掃碼台主要入口：條碼 → 商品 + 標籤；純文字 → 只搜「有標籤的商品」。 */
+function scanDeskLookup(rawCode) {
+  const input = $('scanDeskInput');
+  const code = String(rawCode == null ? (input ? input.value : '') : rawCode).trim();
+  if (!code) {
+    scanDeskEmpty();
+    return null;
+  }
+
+  const hasDigit = /\d/.test(code);
+  const looksLikeBarcode = hasDigit && !/\p{L}/u.test(code);
+
+  if (!looksLikeBarcode) {
+    const matches = findLabeledProductsByName(code);
+    if (!matches.length) {
+      scanDeskNotFound(code);
+      return null;
+    }
+    if (matches.length === 1) {
+      scanDeskShowProduct(matches[0], '用名稱找到');
+      return matches[0];
+    }
+    const card = $('scanDeskCard');
+    card.className = 'scan-card';
+    card.innerHTML = `
+      <div class="scan-name">找到 ${matches.length} 支有標籤的商品</div>
+      <div class="scan-meta">按一下選擇</div>
+      <div class="scan-hit">${matches.slice(0, 12).map(p =>
+        `<button class="btn" data-scan-action="pick" data-id="${escapeHtml(String(p.id))}">${escapeHtml(p.name)}</button>`).join('')}</div>`;
+    return null;
+  }
+
+  const found = findProductByCode(code);
+  if (!found) {
+    scanDeskNotFound(code);
+    return null;
+  }
+  if (found.by === 'ambiguous') {
+    const card = $('scanDeskCard');
+    card.className = 'scan-card';
+    card.innerHTML = `
+      <div class="scan-name">尾 6 碼 ${escapeHtml(code)} 對到多支商品</div>
+      <div class="scan-meta">請掃完整條碼，或按一下選擇</div>
+      <div class="scan-hit">${found.hits.map(p =>
+        `<button class="btn" data-scan-action="pick" data-id="${escapeHtml(String(p.id))}">${escapeHtml(p.name)}${p.barcode ? ` · ${escapeHtml(p.barcode)}` : ''}</button>`).join('')}</div>`;
+    return null;
+  }
+  scanDeskShowProduct(found.product, found.by === 'tail6' ? '用尾 6 碼找到' : '');
+  return found.product;
+}
+
+async function loadScanRecent() {
+  try {
+    const raw = await db.getMeta('scanDeskRecent', null);
+    state.scanRecent = Array.isArray(raw) ? raw.slice(0, SCAN_RECENT_LIMIT) : [];
+  } catch {
+    state.scanRecent = [];
+  }
+  renderScanRecent();
+}
+
+function pushScanRecent(entry) {
+  if (!entry || !entry.name) return;
+  const list = (state.scanRecent || []).filter(item => item.productId !== entry.productId);
+  list.unshift({ ...entry, at: Date.now() });
+  state.scanRecent = list.slice(0, SCAN_RECENT_LIMIT);
+  db.setMeta('scanDeskRecent', state.scanRecent).catch(() => {});
+  renderScanRecent();
+}
+
+function relativeTime(ms) {
+  const diff = Date.now() - Number(ms || 0);
+  if (diff < 60 * 1000) return '剛剛';
+  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)} 分鐘前`;
+  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)} 小時前`;
+  return `${Math.floor(diff / 86400000)} 天前`;
+}
+
+function renderScanRecent() {
+  const wrap = $('scanDeskRecent');
+  const listWrap = $('scanDeskRecentWrap');
+  if (!wrap) return;
+  const list = state.scanRecent || [];
+  if (!list.length) {
+    if (listWrap) listWrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  if (listWrap) listWrap.hidden = false;
+  wrap.innerHTML = list.map(item => `
+    <div class="scan-item" data-scan-recent="${escapeHtml(String(item.productId))}">
+      <span>${escapeHtml(item.name)}</span>
+      <span class="when">${relativeTime(item.at)}</span>
+    </div>`).join('');
+}
+
+function updateScanDeskSummary() {
+  const el = $('scanDeskSummary');
+  if (!el) return;
+  const labeled = labelsByProductId().size;
+  const total = Object.keys(state.labels).length;
+  const unmatched = total - labeled;
+  el.textContent = `可掃描 ${labeled} 支有標籤的商品（商品庫共 ${state.products.length.toLocaleString()} 支）`
+    + (unmatched > 0 ? ` · 還有 ${unmatched} 個標籤未配對` : ' · 全部標籤已配對');
+}
+
+function openScanDeskTab() {
+  updateScanDeskSummary();
+  renderScanRecent();
+  const input = $('scanDeskInput');
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
 /* ------------------------------------------------------- 備份／匯出／診斷 */
 
 function downloadBlob(blob, filename) {
@@ -1955,6 +2180,7 @@ function updateSelectionUI(visibleIds = []) {
 }
 
 function updateStats() {
+  if (typeof updateScanDeskSummary === 'function') { try { updateScanDeskSummary(); } catch { /* ignore */ } }
   $('statProducts').textContent = state.products.length;
   $('statLabels').textContent = Object.keys(state.labels).length;
   $('statMatched').textContent = Object.values(state.labels).filter(l => l.matchedProductName).length;
@@ -2314,17 +2540,86 @@ async function doSearch(query) {
 
 /* ------------------------------------------------------------------ 事件 */
 
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  const panel = $(`panel-${name}`);
+  if (panel) panel.classList.add('active');
+  if (name === 'match') renderMatchList();
+  if (name === 'scan') openScanDeskTab();
+  if (name !== 'search' && name !== 'scan') stopScanner();
+}
+
 function bindEvents() {
   document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      $(`panel-${tab.dataset.tab}`).classList.add('active');
-      if (tab.dataset.tab === 'match') renderMatchList();
-      if (tab.dataset.tab !== 'search') stopScanner();
-    });
+    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
   });
+
+  /* 掃碼台 */
+  if ($('scanDeskGo')) {
+    $('scanDeskGo').addEventListener('click', () => {
+      scanDeskLookup();
+      const input = $('scanDeskInput');
+      if (input) input.select();
+    });
+  }
+  if ($('scanDeskInput')) {
+    // 掃描槍會自動送出 Enter（或 change），兩種都接
+    $('scanDeskInput').addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        scanDeskLookup();
+        event.target.select();
+      }
+    });
+    $('scanDeskInput').addEventListener('change', event => {
+      if (String(event.target.value || '').trim()) {
+        scanDeskLookup();
+        event.target.select();
+      }
+    });
+  }
+  if ($('scanDeskCard')) {
+    $('scanDeskCard').addEventListener('click', async event => {
+      const btn = event.target.closest('button[data-scan-action]');
+      if (!btn) return;
+      const action = btn.dataset.scanAction;
+      if (action === 'preview') previewLabel(btn.dataset.id);
+      else if (action === 'share') shareLabel(btn.dataset.id);
+      else if (action === 'download') {
+        const label = state.labels[btn.dataset.id];
+        if (!label) return;
+        try { fallbackDownload(asFile(await getLabelBlob(label), label.filename, labelMime(label))); }
+        catch (err) { toast(`無法下載：${err.message}`); }
+      } else if (action === 'upload') {
+        switchTab('upload');
+        state.scanDeskUploadingFrom = true;
+      } else if (action === 'match') {
+        switchTab('match');
+        state.matchFilter = 'unmatched';
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'unmatched'));
+        renderMatchList();
+      } else if (action === 'pick') {
+        const product = state.products.find(p => String(p.id) === String(btn.dataset.id));
+        if (product) {
+          scanDeskShowProduct(product, '手動選擇');
+          const input = $('scanDeskInput');
+          if (input) { input.value = product.barcode || ''; input.select(); }
+        }
+      }
+    });
+  }
+  if ($('scanDeskRecent')) {
+    $('scanDeskRecent').addEventListener('click', event => {
+      const row = event.target.closest('[data-scan-recent]');
+      if (!row) return;
+      const product = state.products.find(p => String(p.id) === String(row.dataset.scanRecent));
+      if (!product) return;
+      scanDeskShowProduct(product, '從最近掃過選擇');
+      const input = $('scanDeskInput');
+      if (input) { input.value = product.barcode || ''; }
+    });
+  }
 
   $('pdfInput').addEventListener('change', async event => {
     const input = event.target;
@@ -2734,29 +3029,50 @@ function bindEvents() {
     }
   });
 
-  // 條碼掃描
+  // 條碼掃描（搜尋頁：用尾 6 碼搜尋）
   $('scanBtn').addEventListener('click', async () => {
     if (state.scanning) {
       await stopScanner();
       return;
     }
-    $('reader').classList.add('show');
-    $('scanBtn').textContent = '⏹ 停止掃描';
-    const scanner = new Html5Qrcode('reader');
-    state.scanning = scanner;
     try {
-      await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 270, height: 130 }, aspectRatio: 1.5 }, text => {
-        const tail = barcodeTail6(text);
-        $('barcodeInput').value = tail;
-        doSearch(tail);
-        stopScanner();
-        toast('掃描成功，已使用尾 6 碼搜尋');
-      }, () => {});
+      await startScanner({
+        containerId: 'reader',
+        button: $('scanBtn'),
+        onText: text => {
+          const tail = barcodeTail6(text);
+          $('barcodeInput').value = tail;
+          doSearch(tail);
+          toast('掃描成功，已使用尾 6 碼搜尋');
+        }
+      });
     } catch (err) {
       toast(`無法開啟相機：${err.message || '請確認權限'}`);
-      await stopScanner();
     }
   });
+
+  // 條碼掃描（掃碼台：直接查這支商品的標籤）
+  if ($('scanDeskCamera')) {
+    $('scanDeskCamera').addEventListener('click', async () => {
+      if (state.scanning) {
+        await stopScanner();
+        return;
+      }
+      try {
+        await startScanner({
+          containerId: 'readerDesk',
+          button: $('scanDeskCamera'),
+          onText: text => {
+            const input = $('scanDeskInput');
+            if (input) input.value = text;
+            scanDeskLookup(text);
+          }
+        });
+      } catch (err) {
+        toast(`無法開啟相機：${err.message || '請確認權限'}`);
+      }
+    });
+  }
 
   $('clearDataBtn').addEventListener('click', async () => {
     if (!confirm('確定清除所有「本機」資料？雲端 D1 / R2 資料不會被刪除。')) return;
@@ -2778,17 +3094,47 @@ function bindEvents() {
   });
 }
 
+/** 共用相機掃描：成功讀到條碼後呼叫 onText，並且只觸發一次。 */
+async function startScanner({ containerId, button, onText }) {
+  const container = $(containerId);
+  if (!container) throw new Error('找不到掃描畫面');
+  container.classList.add('show');
+  if (button) button.textContent = '⏹ 停止掃描';
+  const scanner = new Html5Qrcode(containerId);
+  state.scanning = scanner;
+  state.scannerButton = button;
+  let handled = false;
+  try {
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 270, height: 130 }, aspectRatio: 1.5 }, text => {
+      if (handled) return;
+      handled = true;
+      onText(text);
+      stopScanner();
+    }, () => {});
+  } catch (err) {
+    await stopScanner();
+    throw err;
+  }
+}
+
 async function stopScanner() {
   const scanner = state.scanning;
+  const button = state.scannerButton;
   state.scanning = null;
+  state.scannerButton = null;
   if (scanner) {
     try {
       await scanner.stop();
       scanner.clear();
     } catch { /* ignore */ }
   }
-  $('reader').classList.remove('show');
-  $('scanBtn').textContent = '📷 開啟相機掃描條碼';
+  ['reader', 'readerDesk'].forEach(id => {
+    const el = $(id);
+    if (el) el.classList.remove('show');
+  });
+  if (button) button.textContent = button.id === 'scanDeskCamera' ? '📷 開啟相機掃描' : '📷 開啟相機掃描條碼';
+  const searchBtn = $('scanBtn');
+  if (searchBtn) searchBtn.textContent = '📷 開啟相機掃描條碼';
 }
 
 /* ------------------------------------------------------------------ 啟動 */
@@ -2809,6 +3155,8 @@ async function boot() {
     // 上次已刪除但雲端沒確認的 → 不要因為本機還留著記錄就顯示出來
     await loadTombstones();
     await loadPendingLabelSync();
+    await loadScanRecent();
+    updateScanDeskSummary();
     for (const id of Object.keys(state.tombstones)) {
       if (state.labels[id]) {
         try { await db.deleteLabelRecord(id); } catch { /* ignore */ }
@@ -2897,6 +3245,16 @@ window.app = {
   exportDiagnostics,
   diagnoseLabel,
   openToolsModal,
+  scanDeskLookup,
+  scanDeskShowProduct,
+  findProductByCode,
+  findLabeledProductsByName,
+  labelsByProductId,
+  labelForProduct,
+  loadScanRecent,
+  pushScanRecent,
+  renderScanRecent,
+  switchTab,
   diffProducts,
   buildProductsFromRows,
   applyExcelDiff,

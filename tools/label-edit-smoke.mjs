@@ -247,9 +247,11 @@ state.cloudEnabled = false;
 /* ------------------------------- 8. 分頁順序與清除雲端資料按鈕 */
 console.log('\n=== 8. 分頁順序與清除雲端資料 ===');
 const tabs = [...document.querySelectorAll('.tabs .tab')].map(t => t.textContent.trim());
-check('第一個分頁是「搜尋/掃碼」', tabs[0] === '搜尋/掃碼', tabs.join(' / '));
+check('第一個分頁是「掃碼台」', tabs[0].includes('掃碼台'), tabs.join(' / '));
+check('第二個分頁是「搜尋」', tabs[1].includes('搜尋'), tabs.join(' / '));
 check('最後一個分頁是「上傳」', tabs[tabs.length - 1] === '上傳', tabs.join(' / '));
-check('預設顯示搜尋面板', document.getElementById('panel-search').classList.contains('active'));
+check('預設顯示掃碼台面板', document.getElementById('panel-scan').classList.contains('active'));
+check('搜尋面板預設隱藏', !document.getElementById('panel-search').classList.contains('active'));
 check('上傳面板預設隱藏', !document.getElementById('panel-upload').classList.contains('active'));
 
 state.cloudEnabled = true;
@@ -571,6 +573,108 @@ check('工具視窗可關閉', !document.getElementById('toolsModal').classList.
 window.URL.createObjectURL = originalCreate;
 globalThis.URL.createObjectURL = originalCreateGlobal;
 window.HTMLAnchorElement.prototype.click = originalClick;
+
+/* ------------------------------- 14. 掃碼台（掃一下 → 直接出標籤） */
+console.log('\n=== 14. 掃碼台 ===');
+
+state.products = [
+  { id: 501, name: '達利園瑞士卷草莓味 240g', barcode: '6901234567890', barcode2: '', labelId: null },
+  { id: 502, name: '佳得樂檸檬味運動飲料 600ml', barcode: '6901234567892', barcode2: '', labelId: null },
+  { id: 503, name: '沒有標籤的商品', barcode: '6901234567899', barcode2: '', labelId: null },
+  { id: 504, name: '佳得樂檸檬味運動飲料 900ml', barcode: '6901234567893', barcode2: '', labelId: null }
+];
+state.labels = {
+  's-1': makeLabel('s-1', 'hash-s1', '達利園瑞士卷草莓味_標籤_7x4cm', {
+    productId: 501, matchedProductName: '達利園瑞士卷草莓味 240g', matchSource: 'auto', uploaded: true, ext: 'wdfx',
+    filename: '達利園瑞士卷草莓味240g_標籤_7x4cm.wdfx'
+  }),
+  's-2': makeLabel('s-2', 'hash-s2', '佳得樂檸檬味運動飲料_標籤_7x4cm', {
+    productId: 502, matchedProductName: '佳得樂檸檬味運動飲料 600ml', matchSource: 'auto', uploaded: true, ext: 'pdf'
+  })
+};
+state.scanRecent = [];
+state.cloudEnabled = false;
+window.app.switchTab('scan');
+await wait(60);
+
+check('掃碼台是預設分頁', document.getElementById('panel-scan').classList.contains('active'),
+  document.querySelector('.tab.active') ? document.querySelector('.tab.active').textContent : '');
+check('掃碼台摘要只算「有標籤的商品」（2 支）',
+  /可掃描 2 支有標籤的商品/.test(document.getElementById('scanDeskSummary').textContent),
+  document.getElementById('scanDeskSummary').textContent);
+check('摘要會顯示未配對數', /還有 \d+ 個標籤未配對|全部標籤已配對/.test(document.getElementById('scanDeskSummary').textContent));
+
+// 1) 掃到有標籤的商品（完整條碼）
+document.getElementById('scanDeskInput').value = '6901234567890';
+window.app.scanDeskLookup();
+await wait(60);
+const card = document.getElementById('scanDeskCard');
+check('掃到有標籤的商品 → 顯示商品名稱', /達利園瑞士卷草莓味 240g/.test(card.textContent), card.textContent.slice(0, 60));
+check('顯示標籤檔名與格式', /wdfx/i.test(card.textContent) && /WDFX/i.test(card.textContent), card.textContent.slice(0, 120));
+check('有「WePrint」與「預覽」「下載」三個動作', /WePrint/.test(card.textContent) && /預覽/.test(card.textContent) && /下載/.test(card.textContent));
+check('掃過的會進入「最近掃過」', document.getElementById('scanDeskRecent').textContent.includes('達利園瑞士卷草莓味 240g'),
+  document.getElementById('scanDeskRecent').textContent.trim());
+
+// 2) 條碼尾 6 碼（唯一的商品）
+document.getElementById('scanDeskInput').value = '567892';
+window.app.scanDeskLookup();
+await wait(60);
+check('輸入尾 6 碼也能找到', /佳得樂檸檬味運動飲料 600ml/.test(card.textContent), card.textContent.slice(0, 60));
+check('有標示是用尾 6 碼找到', /尾 6 碼/.test(card.textContent), card.textContent.slice(0, 80));
+
+// 3) 商品存在但沒有標籤
+document.getElementById('scanDeskInput').value = '6901234567899';
+window.app.scanDeskLookup();
+await wait(60);
+check('沒有標籤的商品會變紅色警告', card.classList.contains('warn'));
+check('警告寫「這支商品還沒有標籤」', /這支商品還沒有標籤/.test(card.textContent), card.textContent.slice(0, 60));
+check('警告提供「上傳標籤」與「去配對管理」', /上傳標籤/.test(card.textContent) && /配對管理/.test(card.textContent));
+
+// 4) 商品庫完全沒有這個條碼
+document.getElementById('scanDeskInput').value = '9999999999999';
+window.app.scanDeskLookup();
+await wait(60);
+check('不存在的條碼 → 明確說明', /商品庫沒有這個條碼/.test(card.textContent), card.textContent.slice(0, 60));
+
+// 5) 範圍限制：搜尋只搜「有標籤的商品」
+const hits = window.app.findLabeledProductsByName('佳得樂');
+check('名稱搜尋只在有標籤的 2 支裡找（不含 900ml）', hits.length === 1 && hits[0].id === 502,
+  hits.map(p => p.id).join(','));
+const noLabelHits = window.app.findLabeledProductsByName('沒有標籤的商品');
+check('沒有標籤的商品不會出現在掃碼台搜尋結果', noLabelHits.length === 0, String(noLabelHits.length));
+
+// 6) 動作：上傳 → 切到上傳分頁；配對 → 切到配對管理
+card.querySelector('[data-scan-action="upload"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(60);
+check('按「上傳標籤」會切到上傳分頁', document.getElementById('panel-upload').classList.contains('active'));
+document.getElementById('scanDeskInput').value = '6901234567899';
+window.app.scanDeskLookup();
+await wait(60);
+card.querySelector('[data-scan-action="match"]').dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(60);
+check('按「去配對管理」會切到配對管理並篩選未配對', document.getElementById('panel-match').classList.contains('active'));
+
+// 7) 重複掃同一支不會在「最近掃過」重複
+window.app.switchTab('scan');
+await wait(40);
+document.getElementById('scanDeskInput').value = '6901234567890';
+window.app.scanDeskLookup();
+await wait(60);
+const recentRows = [...document.querySelectorAll('#scanDeskRecent [data-scan-recent]')];
+check('最近掃過不會重複同一支商品', recentRows.filter(r => r.dataset.scanRecent === '501').length === 1,
+  recentRows.map(r => r.dataset.scanRecent).join(','));
+check('最近掃過最多 12 筆', recentRows.length <= 12, String(recentRows.length));
+
+// 8) 按「最近掃過」可以立刻回到那支商品
+recentRows.find(r => r.dataset.scanRecent === '502').dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(60);
+check('按最近掃過會顯示該商品標籤', /佳得樂檸檬味運動飲料 600ml/.test(card.textContent), card.textContent.slice(0, 60));
+
+// 9) 分頁順序：掃碼台在最前
+const tabLabels = [...document.querySelectorAll('.tab')].map(t => t.textContent.trim());
+check('分頁順序：掃碼台 → 搜尋 → 配對管理 → 上傳',
+  tabLabels[0].includes('掃碼台') && tabLabels[1].includes('搜尋') && tabLabels[2].includes('配對管理') && tabLabels[3].includes('上傳'),
+  tabLabels.join(' | '));
 
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);

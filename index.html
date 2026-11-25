@@ -74,6 +74,21 @@
 .clear-opt small{color:#64748b}
 .format-row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
 .format-row .btn{width:auto;flex:1 1 45%}
+.scan-card{margin-top:14px;border:1px solid #dcebe6;border-radius:16px;padding:16px;background:#fbfefd;min-height:120px;display:flex;flex-direction:column;justify-content:center}
+.scan-card.empty{color:#93a8a2;font-size:14px;align-items:center;text-align:center}
+.scan-card.warn{border-color:#f2c1c1;background:#fff6f6}
+.scan-card .scan-name{font-size:18px;font-weight:700;margin-bottom:4px}
+.scan-card .scan-meta{font-size:12.5px;color:#6b857e;margin-bottom:10px}
+.scan-card .scan-label{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;background:#e3f4ef;color:#14664f;border-radius:8px;padding:5px 10px;margin-bottom:12px;word-break:break-all}
+.scan-card .scan-warn-title{font-size:16px;font-weight:700;color:#a82222;margin-bottom:6px}
+.scan-card .scan-warn-body{font-size:13px;color:#8a3b3b;line-height:1.7;margin-bottom:12px}
+.scan-actions{display:flex;gap:8px;flex-wrap:wrap}
+.scan-actions .btn{flex:1 1 30%;width:auto;min-width:88px}
+.scan-h3{font-size:13px;color:#6b857e;font-weight:600;margin:18px 0 8px}
+.scan-item{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:11px 13px;background:#fff;border:1px solid #e6f0ec;border-radius:12px;margin-bottom:8px;font-size:14px;cursor:pointer}
+.scan-item:active{background:#f2f8f6}
+.scan-item .when{font-size:11.5px;color:#9bb0aa;white-space:nowrap}
+.scan-hit{display:flex;flex-direction:column;gap:6px;margin-top:8px}
 .tools-list{display:flex;flex-direction:column;gap:8px;margin:14px 0}
 .tools-list .btn{width:100%;text-align:left}
 .diff-counts{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
@@ -91,7 +106,8 @@
 <body>
 <header><h1>🏷️ 商品標籤助手</h1><p>上傳 → 配對 → 掃碼 → 分享到 WePrint</p></header>
 <div class="tabs">
-  <button class="tab active" data-tab="search">搜尋/掃碼</button>
+  <button class="tab active" data-tab="scan">📷 掃碼台</button>
+  <button class="tab" data-tab="search">🔍 搜尋</button>
   <button class="tab" data-tab="match">配對管理</button>
   <button class="tab" data-tab="upload">上傳</button>
 </div>
@@ -213,7 +229,27 @@
   </div>
 </div>
 
-<div id="panel-search" class="panel active">
+<div id="panel-scan" class="panel active">
+  <div class="card">
+    <h2>📷 掃碼台</h2>
+    <div class="sub" id="scanDeskSummary">掃一下商品條碼，直接拿到這支商品的標籤。</div>
+    <div class="search-box">
+      <input type="text" id="scanDeskInput" placeholder="掃描／輸入條碼，或商品名稱…" autocomplete="off">
+      <button class="btn btn-primary" style="width:auto;padding:12px 16px" id="scanDeskGo">查</button>
+    </div>
+    <button class="btn btn-scan" id="scanDeskCamera">📷 開啟相機掃描</button>
+    <div id="readerDesk"></div>
+    <div id="scanDeskCard" class="scan-card empty">
+      <div class="scan-empty">等待掃描…<br><small>用掃描槍／條碼機時，數字會自動打進來</small></div>
+    </div>
+    <div id="scanDeskRecentWrap">
+      <h3 class="scan-h3">最近掃過</h3>
+      <div id="scanDeskRecent"></div>
+    </div>
+  </div>
+</div>
+
+<div id="panel-search" class="panel">
   <div class="card">
     <h2>🔍 搜尋商品</h2>
     <button class="btn btn-scan" id="scanBtn">📷 開啟相機掃描條碼</button>
