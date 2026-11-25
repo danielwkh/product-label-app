@@ -55,6 +55,19 @@ const state = {
 
 /* --------------------------------------------------------------- 小工具 */
 
+/** 把技術錯誤翻成人話（使用者看到「API 500」根本不知道要等還是要修） */
+function humanizeCloudError(message) {
+  const raw = String(message || '');
+  if (/exceeded D1|free tier daily row read limit/i.test(raw)) {
+    return '雲端資料庫今日額度已用完（香港時間每天早上 8:00 重置；或升級 Cloudflare Workers Paid 就沒有這個限制）';
+  }
+  if (/D1 binding DB is not configured/i.test(raw)) return '雲端資料庫尚未設定（D1 binding 缺失）';
+  if (/quota|storage/i.test(raw) && /browser|本機/i.test(raw)) return '本機儲存空間不足';
+  if (/network|fetch|Failed to fetch/i.test(raw)) return '連不上網路（或 Cloudflare 暫時不可用）';
+  if (/^雲端 API 500$|\b500\b/.test(raw)) return `雲端伺服器錯誤（500）：${raw}`;
+  return raw;
+}
+
 function toast(message, duration = 2600) {
   const el = $('toast');
   if (!el) return;
@@ -619,10 +632,18 @@ async function loadCloudData() {
       }
     }
 
+    if (meta && meta.degraded) {
+      // 雲端有回應但資料庫讀不到（例如 D1 額度用完）→ 說清楚，不要只顯示 500
+      state.cloudEnabled = false;
+      state.cloudError = humanizeCloudError(meta.schemaError || '雲端資料庫暫時不可用');
+      showStatus('cloudStatus', `目前使用本機資料：${state.cloudError}`, 'error');
+      return false;
+    }
+
     const data = await api.bootstrap(meta && meta.revision);
     if (!data || !data.cloud) {
       state.cloudEnabled = false;
-      state.cloudError = data && data.error ? data.error : '雲端 API 未啟用';
+      state.cloudError = humanizeCloudError(data && data.error ? data.error : '雲端 API 未啟用');
       showStatus('cloudStatus', `目前使用本機資料：${state.cloudError}`, 'error');
       return false;
     }
@@ -759,7 +780,7 @@ async function syncAllToCloud() {
     }
     if (!state.cloudEnabled) await loadCloudData();
     if (!state.cloudEnabled) {
-      showStatus('cloudStatus', `無法連線雲端：${state.cloudError || '未知錯誤'}（目前使用本機資料）`, 'error');
+      showStatus('cloudStatus', `無法連線雲端：${humanizeCloudError(state.cloudError || '未知錯誤')}（目前使用本機資料，操作都會存在本機）`, 'error');
       return;
     }
   }
