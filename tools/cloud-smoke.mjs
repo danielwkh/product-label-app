@@ -49,6 +49,8 @@ const remoteLabels = [
 
 const calls = { bootstrap: 0, meta: 0, labelList: 0, productsBulk: 0, productsBulkRows: 0, labelsSync: 0, labelsUpload: 0, bulkDelete: 0, singleDelete: 0 };
 let failDelete = false;
+let failPatch = false;
+let lastSyncRows = [];
 let cloudLabels = remoteLabels.map(l => ({ ...l }));
 let productsRevision = '1';
 let labelsRevision = '1';
@@ -106,7 +108,15 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (target.includes('/api/labels/sync')) {
     calls.labelsSync++;
-    return json({ ok: true, count: 1 });
+    const body = JSON.parse(options.body || '{}');
+    lastSyncRows = body.labels || [];
+    if (failPatch) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
+    return json({ ok: true, count: lastSyncRows.length });
+  }
+  if (/\/api\/labels\/[^/]+$/.test(target) && options.method === 'PATCH') {
+    calls.patch = (calls.patch || 0) + 1;
+    if (failPatch) return json({ error: 'D1_ERROR: exceeded free tier' }, 500);
+    return json({ ok: true, id: 'x' });
   }
   if (target.match(/\/api\/labels$/) && options.method === 'POST') {
     calls.labelsUpload++;
@@ -266,6 +276,59 @@ await new Promise(r => setTimeout(r, 200));
 check('雲端恢復後會自動補刪', flushed >= 1, `補刪 ${flushed} 筆`);
 check('雲端真的刪掉了', !cloudLabels.some(l => l.id === victimId), cloudLabels.map(l => l.id).join(','));
 check('墓碑清掉（不會無限重試）', !window.app.state.tombstones[victimId]);
+
+/* ------------------- 情境 6：改名／配對在雲端失敗後，同步要真的補送（含名稱） */
+
+console.log('\n=== 情境 6：改名沒上傳 → 下次同步要補送名稱 ===');
+failDelete = false;
+await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 500));
+const renameId = Object.keys(window.app.state.labels)[0];
+check('有一個標籤可以改名', Boolean(renameId));
+
+failPatch = true;                                       // 模擬 D1 額度用完
+await window.app.renameLabel(renameId, '改名後的商品名稱');
+await new Promise(r => setTimeout(r, 300));
+check('本機名稱已改', window.app.state.labels[renameId].nameFromFile === '改名後的商品名稱',
+  window.app.state.labels[renameId].nameFromFile);
+check('記下「待上傳」', window.app.pendingCount() >= 1, `${window.app.pendingCount()} 筆`);
+check('訊息說明已記錄待上傳', /待上傳|自動補送/.test(document.getElementById('toast').textContent)
+  || /待上傳/.test(statusText()), document.getElementById('toast').textContent);
+
+failPatch = false;                                      // 雲端恢復
+lastSyncRows = [];
+const sent = await window.app.syncMatchMetadata();
+await new Promise(r => setTimeout(r, 200));
+check('同步會把待上傳的送出去', sent >= 1, `送出 ${sent} 筆`);
+check('送出的內容包含改好的名稱', lastSyncRows.some(r => r.id === renameId && r.nameFromFile === '改名後的商品名稱'),
+  JSON.stringify(lastSyncRows.find(r => r.id === renameId) || {}));
+check('送出成功後清空待上傳', window.app.pendingCount() === 0, `${window.app.pendingCount()} 筆`);
+
+/* --------------- 情境 7：只送有改動的（不會每次都重送全部標籤） */
+
+console.log('\n=== 情境 7：同步只送有改動的標籤 ===');
+lastSyncRows = [];
+await window.app.syncMatchMetadata();
+await new Promise(r => setTimeout(r, 150));
+check('沒有改動時不會送任何標籤', lastSyncRows.length === 0, `${lastSyncRows.length} 筆`);
+
+await window.app.markLabelDirty([renameId]);
+lastSyncRows = [];
+await window.app.syncMatchMetadata();
+await new Promise(r => setTimeout(r, 150));
+check('只有 1 筆改動時只送 1 筆（不是全部）', lastSyncRows.length === 1, `${lastSyncRows.length} 筆`);
+
+/* --------------- 情境 8：配對不應該讓所有裝置重讀 22,481 列商品 */
+
+console.log('\n=== 情境 8：配對完成後不會重抓全部商品 ===');
+const revisionBefore = productsRevision;
+const bootstrapBefore5 = calls.bootstrap;
+await window.app.renameLabel(renameId, '再一次改名');
+await new Promise(r => setTimeout(r, 300));
+check('配對／改名不會改動商品版本號', productsRevision === revisionBefore, `${revisionBefore} → ${productsRevision}`);
+await window.app.reloadCloud();
+await new Promise(r => setTimeout(r, 600));
+check('因此不會重新 bootstrap 22,481 列', calls.bootstrap === bootstrapBefore5, `bootstrap +${calls.bootstrap - bootstrapBefore5}`);
 
 console.log(`\n=== 結果：${failures === 0 ? '全部通過' : `${failures} 項失敗`} ===`);
 await db.deleteDatabase();

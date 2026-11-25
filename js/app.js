@@ -49,7 +49,8 @@ const state = {
   preview: { url: null, labelId: null, pdf: null, page: 1 },
   scanning: null,
   blobCache: new Map(),
-  tombstones: {}               // 已刪除但雲端還沒確認的標籤 id → 刪除時間（防「刪了又復活」）
+  tombstones: {},              // 已刪除但雲端還沒確認的標籤 id → 刪除時間（防「刪了又復活」）
+  pendingLabelSync: new Set()  // 改名／配對改了但雲端還沒確認的標籤 id → 下次同步補送
 };
 
 /* --------------------------------------------------------------- 小工具 */
@@ -351,6 +352,7 @@ async function handlePdfSelection(fileList) {
     );
     if (state.cloudEnabled) await pipeline.waitUploads();
     await refreshStateFromPipeline();
+    await markLabelDirty(current.map(j => j.labelId).filter(Boolean));
     if (state.cloudEnabled) await syncMatchMetadata();
   } catch (err) {
     console.error(err);
@@ -445,6 +447,58 @@ async function clearTombstones(ids) {
   } catch (err) {
     console.warn('[labels] 清除刪除紀錄失敗', err);
   }
+}
+
+/* ------------------------------------- 待上傳的標籤改動（改名／配對／延後） */
+/*
+ * 為什麼需要：改名或配對時如果雲端回 500（例如 D1 額度用完），
+ * 以前只是 toast 一句「稍後按同步會補送」，但「同步」其實只送配對、不送名稱 →
+ * 改好的名字永遠上不去。現在把沒送成功的 id 存在本機，每次連線／同步自動補送。
+ */
+
+async function loadPendingLabelSync() {
+  try {
+    const raw = await db.getMeta('pendingLabelSync', null);
+    state.pendingLabelSync = new Set(Array.isArray(raw) ? raw : []);
+  } catch {
+    state.pendingLabelSync = new Set();
+  }
+  return state.pendingLabelSync;
+}
+
+function pendingCount() {
+  return state.pendingLabelSync ? state.pendingLabelSync.size : 0;
+}
+
+async function markLabelDirty(ids) {
+  const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+  if (!list.length) return;
+  for (const id of list) state.pendingLabelSync.add(id);
+  try { await db.setMeta('pendingLabelSync', [...state.pendingLabelSync]); } catch { /* ignore */ }
+}
+
+async function clearLabelDirty(ids) {
+  if (!ids || !ids.length) return;
+  for (const id of ids) state.pendingLabelSync.delete(id);
+  try { await db.setMeta('pendingLabelSync', [...state.pendingLabelSync]); } catch { /* ignore */ }
+}
+
+/** 用 labels 表推出「商品 → 標籤」連結（商品表的 label_id 只是快取） */
+function relinkProductsFromLabels() {
+  const byProduct = new Map();
+  for (const label of Object.values(state.labels)) {
+    if (label && label.productId != null) byProduct.set(Number(label.productId), label.id);
+  }
+  const changed = [];
+  for (const product of state.products) {
+    const next = byProduct.get(Number(product.id)) || null;
+    if ((product.labelId || null) !== next) {
+      product.labelId = next;
+      changed.push(product);
+    }
+  }
+  if (changed.length) db.putProducts(changed, 500).catch(() => {});
+  return changed.length;
 }
 
 /**
@@ -547,6 +601,20 @@ async function loadCloudData() {
         showStatus('cloudStatus', `已連線雲端：${state.products.length.toLocaleString()} 個商品（本機快取）、${Object.keys(state.labels).length} 個標籤`
           + `${labelsChanged ? '（已更新）' : ''}`);
         await flushTombstones();
+        relinkProductsFromLabels();
+        // 新版第一次連線：做一次完整對帳（把舊版沒送出成功的改名／配對補上），之後就只送有改動的
+        let fullSynced = await db.getMeta('cloudLabelsReconciled', false).catch(() => false);
+        if (!fullSynced) {
+          const sentAll = await syncMatchMetadata({ all: true });
+          if (sentAll) {
+            await db.setMeta('cloudLabelsReconciled', true).catch(() => {});
+            console.info(`[cloud] 首次完整對帳：已補送 ${sentAll} 筆標籤的改名／配對`);
+          }
+        }
+        if (pendingCount()) {
+          await syncMatchMetadata();
+          if (pendingCount()) showStatus('cloudStatus', `已連線雲端，但還有 ${pendingCount()} 筆改動待上傳（雲端暫時不可用，稍後自動補送）`, 'warn');
+        }
         return true;
       }
     }
@@ -639,27 +707,44 @@ async function loadCloudData() {
   }
 }
 
-async function syncMatchMetadata() {
-  if (!state.cloudEnabled) return;
-  const remote = Object.values(state.labels).filter(l => l.uploaded);
+async function syncMatchMetadata(options = {}) {
+  if (!state.cloudEnabled) return 0;
+  const onlyDirty = options.all !== true;
+  // 預設只送「有改動的」：以前每次都把 300 多個標籤全部重送，慢又浪費寫入
+  const targets = (onlyDirty
+    ? [...state.pendingLabelSync].map(id => state.labels[id])
+    : Object.values(state.labels))
+    .filter(l => l && l.uploaded);
+
   const chunk = 200;
-  for (let i = 0; i < remote.length; i += chunk) {
-    const slice = remote.slice(i, i + chunk).map(l => ({
+  let synced = 0;
+  for (let i = 0; i < targets.length; i += chunk) {
+    const slice = targets.slice(i, i + chunk).map(l => ({
       id: l.id,
       productId: l.productId ?? null,
       matchedProductName: l.matchedProductName || null,
       matchSource: l.matchSource || null,
       matchScore: l.matchScore ?? null,
-      matchConfidence: l.matchConfidence || null,
+      matchConfidence: l.matchConfidence ?? null,
       matchGap: l.matchGap ?? null,
-      matchWhy: l.matchWhy || null
+      matchWhy: l.matchWhy ?? null,
+      nameFromFile: l.nameFromFile || null,
+      deferred: Boolean(l.deferred)
     }));
     try {
       await cloudRequestSafe(() => api.syncLabelMeta(slice), 'labels/sync');
-    } catch {
+      await clearLabelDirty(slice.map(row => row.id));
+      synced += slice.length;
+    } catch (err) {
+      console.warn('[cloud] 配對／改名上傳失敗，已保留待上傳', err);
       break;
     }
   }
+  if (synced) relinkProductsFromLabels();
+  if (pendingCount()) {
+    showStatus('cloudStatus', `還有 ${pendingCount()} 筆標籤改動尚未上傳（雲端暫時不可用，下次同步會自動補送）`, 'warn');
+  }
+  return synced;
 }
 
 async function syncAllToCloud() {
@@ -687,7 +772,8 @@ async function syncAllToCloud() {
     const changed = state.products.filter(p => {
       if (!remote) return true;
       const row = remote.get(p.id);
-      return !row || row.name !== p.name || row.barcode !== (p.barcode || '') || row.barcode2 !== (p.barcode2 || '') || row.labelId !== (p.labelId || null);
+      // labelId 不比：商品的標籤連結由 labels 表決定，不是商品資料的一部分
+      return !row || row.name !== p.name || row.barcode !== (p.barcode || '') || row.barcode2 !== (p.barcode2 || '');
     });
     if (!state.products.length) {
       showStatus('cloudStatus', '本機沒有商品資料，請先上傳 Excel', 'error');
@@ -705,7 +791,7 @@ async function syncAllToCloud() {
       }
     }
     state.remoteProducts = new Map(state.products.map(p => [p.id, {
-      name: p.name, barcode: p.barcode, barcode2: p.barcode2, labelId: p.labelId || null
+      name: p.name, barcode: p.barcode, barcode2: p.barcode2
     }]));
 
     // 1.5) 先補刪「本機已刪、雲端還沒確認」的標籤（避免同步又把它們拉回來）
@@ -738,8 +824,8 @@ async function syncAllToCloud() {
       }
     }
 
-    // 4) 配對結果
-    await syncMatchMetadata();
+    // 4) 配對結果（手動同步＝完整對帳，連之前失敗的改名也一起補）
+    await syncMatchMetadata({ all: true });
     await refreshStateFromPipeline();
 
     try {
@@ -751,6 +837,7 @@ async function syncAllToCloud() {
     } catch { /* 記不到 revision 只會讓下次多抓一次 bootstrap */ }
 
     const parts = [`商品 ${changed.length ? `已同步 ${changed.length.toLocaleString()} 筆` : '已是最新（無變動）'}`];
+    if (pendingCount()) parts.push(`⚠️ 仍有 ${pendingCount()} 筆標籤改動待上傳`);
     if (queued || legacyUploaded) parts.push(`PDF 上傳 ${queued + legacyUploaded} 個`);
     if (flushed) parts.push(`補刪 ${flushed} 個`);
     showStatus('cloudStatus', `同步完成：${parts.join('、')}`);
@@ -927,6 +1014,7 @@ async function applyExcelDiff(products, diff, options = {}) {
       }
     });
     await refreshStateFromPipeline();
+    await markLabelDirty(Object.values(state.labels).filter(l => l.uploaded).map(l => l.id));
     const totalText = total;
     status(`已套用：新增 ${summary.added}、修改 ${summary.changed}、刪除 ${deleteRemoved ? summary.removed : `0（保留 ${summary.removed}）`}；重新檢查 ${totalText} 個標籤`);
   }
@@ -1230,14 +1318,18 @@ async function renameLabel(id, rawName) {
   label.updatedAt = nowISO();
   try { await db.putLabel(label); } catch (err) { console.warn('[labels] 本機名稱更新失敗', err); }
 
+  await markLabelDirty([id]);
   let cloudNote = '';
   if (state.cloudEnabled && label.uploaded) {
     try {
       await api.patchLabel(id, { nameFromFile: name });
+      await clearLabelDirty([id]);
     } catch (err) {
-      cloudNote = '（雲端尚未更新，稍後按「同步」會補送）';
-      console.warn('[labels] 改名同步失敗', err);
+      cloudNote = '（雲端暫時不可用，已記錄，下次同步會自動補送）';
+      console.warn('[labels] 改名同步失敗，已排入待上傳', err);
     }
+  } else {
+    cloudNote = '（本機儲存；下次連線同步會補上）';
   }
   try { pipeline.setLabels(state.labels); } catch { /* ignore */ }
   renderMatchList();
@@ -1250,33 +1342,15 @@ async function renameLabel(id, rawName) {
 async function setDeferred(ids, value) {
   const targets = ids.map(id => state.labels[id]).filter(Boolean);
   if (!targets.length) return 0;
-  const cloudBatch = [];
   for (const label of targets) {
     label.deferred = Boolean(value);
     label.updatedAt = nowISO();
     try { await db.putLabel(label); } catch (err) { console.warn('[defer] 本機更新失敗', err); }
-    if (state.cloudEnabled && label.uploaded) {
-      cloudBatch.push({
-        id: label.id,
-        productId: label.productId,
-        matchedProductName: label.matchedProductName,
-        matchSource: label.matchSource,
-        matchScore: label.matchScore,
-        matchConfidence: label.matchConfidence,
-        matchGap: label.matchGap,
-        matchWhy: label.matchWhy,
-        deferred: value
-      });
-    }
   }
-  // 一次請求搞定（/api/labels/sync 支援 deferred），避免幾百個 PATCH
-  for (let i = 0; i < cloudBatch.length; i += 200) {
-    try {
-      await api.syncLabelMeta(cloudBatch.slice(i, i + 200));
-    } catch (err) {
-      console.warn('[defer] 雲端更新失敗（下次按同步會補）', err);
-    }
-  }
+  // 標記待上傳 → 下一次同步（或現在）用 /api/labels/sync 一次補送，失敗也會保留
+  await markLabelDirty(targets.map(label => label.id));
+  await syncMatchMetadata();
+  if (pendingCount()) toast(`已在本機${value ? '延後' : '取消延後'} ${targets.length} 筆；${pendingCount()} 筆改動待上傳`);
   renderMatchList();
   return targets.length;
 }
@@ -1731,6 +1805,7 @@ function closeMatchModal() {
 
 async function persistLabelEverywhere(label) {
   await db.putLabel(label);
+  await markLabelDirty([label.id]);
   if (state.cloudEnabled && label.uploaded) {
     try {
       await api.patchLabel(label.id, {
@@ -1742,8 +1817,9 @@ async function persistLabelEverywhere(label) {
         matchGap: label.matchGap ?? null,
         matchWhy: label.matchWhy || null
       });
+      await clearLabelDirty([label.id]);
     } catch (err) {
-      toast(`已存本機，雲端同步稍後重試：${err.message}`);
+      toast(`已存本機；雲端暫時不可用，已記錄待上傳（${err.message}）`);
     }
   }
 }
@@ -2220,8 +2296,10 @@ function bindEvents() {
     matcher.setManualLabelIds(manualLabelIdSet());
     updateStats();
     renderMatchList();
+    await markLabelDirty(updates.map(label => label.id));
     if (state.cloudEnabled) await syncMatchMetadata();
-    showStatus('pdfStatus', `已重新配對 ${changed} 項${skipped ? `；跳過人工鎖定 ${skipped} 項` : ''}`);
+    showStatus('pdfStatus', `已重新配對 ${changed} 項${skipped ? `；跳過人工鎖定 ${skipped} 項` : ''}`
+      + (pendingCount() ? `（${pendingCount()} 筆待上傳）` : ''));
     toast(`已重新配對 ${changed} 項`);
   });
 
@@ -2335,8 +2413,9 @@ function bindEvents() {
     matcher.setManualLabelIds(manualLabelIdSet());
     updateStats();
     renderMatchList();
+    await markLabelDirty(ids);
     if (state.cloudEnabled) await syncMatchMetadata();
-    toast(`已解除 ${ids.length} 項配對`);
+    toast(pendingCount() ? `已解除 ${ids.length} 項配對（${pendingCount()} 筆待上傳）` : `已解除 ${ids.length} 項配對`);
   });
 
   // 手動配對視窗
@@ -2481,6 +2560,7 @@ async function boot() {
     state.labels = await db.getLabels();
     // 上次已刪除但雲端沒確認的 → 不要因為本機還留著記錄就顯示出來
     await loadTombstones();
+    await loadPendingLabelSync();
     for (const id of Object.keys(state.tombstones)) {
       if (state.labels[id]) {
         try { await db.deleteLabelRecord(id); } catch { /* ignore */ }
@@ -2558,6 +2638,11 @@ window.app = {
   flushTombstones,
   loadTombstones,
   clearTombstones,
+  syncMatchMetadata,
+  relinkProductsFromLabels,
+  loadPendingLabelSync,
+  markLabelDirty,
+  pendingCount,
   diffProducts,
   buildProductsFromRows,
   applyExcelDiff,

@@ -382,6 +382,7 @@ export async function onRequestPost({ request, env }) {
         if (!l || !l.id) continue;
         statements.push(env.DB.prepare(`UPDATE labels SET product_id=?, matched_product_name=?, match_source=?,
           match_score=?, match_confidence=?, match_gap=?, match_why=?,
+          name_from_file=COALESCE(?, name_from_file),
           deferred=COALESCE(?, deferred), updated_at=? WHERE id=?`).bind(
           l.productId == null ? null : Number(l.productId),
           l.matchedProductName || null,
@@ -390,6 +391,7 @@ export async function onRequestPost({ request, env }) {
           l.matchConfidence || null,
           l.matchGap == null ? null : Number(l.matchGap),
           l.matchWhy || null,
+          l.nameFromFile ? String(l.nameFromFile).slice(0, 300) : null,
           l.deferred == null ? null : (l.deferred ? 1 : 0),
           timestamp,
           String(l.id)
@@ -418,7 +420,10 @@ export async function onRequestPost({ request, env }) {
     }
 
     if (written) await bumpRevision(env, 'labels_revision');
-    if (linked.length || unlinked.length) await bumpRevision(env, 'products_revision');
+    // 注意：這裡刻意「不」遞增 products_revision。
+    // 商品與標籤的連結由 labels 表決定，前端會自己用 labels 推出 product.labelId；
+    // 若在這裡遞增，使用者每配對一次，所有裝置下次開頁就要重讀 22,481 列商品，
+    // 一天幾百次就會把 D1 免費額度燒光（2026-11-25 就是這樣發生的）。
     return json({ ok: true, count: written });
   }
 
@@ -501,7 +506,7 @@ export async function onRequestPost({ request, env }) {
     ];
     await env.DB.batch(statements);
     await bumpRevision(env, 'labels_revision');
-    await bumpRevision(env, 'products_revision');
+    // 不遞增 products_revision：避免刪一個 PDF 就讓所有裝置重讀 22,481 列商品
     return json({ ok: true, deleted: found.length, ids: found.map(row => row.id) });
   }
 
@@ -636,7 +641,7 @@ export async function onRequestPatch({ request, env }) {
       await env.DB.prepare('UPDATE products SET label_id = ?, updated_at = ? WHERE id = ?')
         .bind(id, timestamp, productId).run();
     }
-    await bumpRevision(env, 'products_revision');
+    // 不遞增 products_revision（見 labels/sync 的說明）
   }
   await bumpRevision(env, 'labels_revision');
   return json({ ok: true, id, nameFromFile });
@@ -656,6 +661,6 @@ export async function onRequestDelete({ request, env }) {
   await env.DB.prepare('UPDATE products SET label_id = NULL, updated_at = ? WHERE label_id = ?').bind(now(), id).run();
   await env.DB.prepare('DELETE FROM labels WHERE id = ?').bind(id).run();
   await bumpRevision(env, 'labels_revision');
-  await bumpRevision(env, 'products_revision');
+  // 不遞增 products_revision（見 labels/sync 的說明）
   return json({ ok: true, id });
 }

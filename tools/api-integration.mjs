@@ -304,6 +304,35 @@ check('該標籤變成未配對（但檔案還在）', orphanLabel.pid === null 
 const stillThere = await db.prepare('SELECT COUNT(*) AS n FROM labels WHERE id = ?').bind(victimLabel.id).first();
 check('標籤本身沒有被刪除', stillThere.n === 1, String(stillThere.n));
 
+/* ------------------- 9d. labels/sync 支援改名，且不應改動 products_revision */
+console.log('\n=== 9d. 批次同步支援改名（且不燒商品版本） ===');
+const metaBeforeSync = await (await api.onRequestGet({ request: request('/api/meta'), env })).json();
+const survivors = (await db.prepare('SELECT id, name_from_file AS nf FROM labels ORDER BY uploaded_at LIMIT 3').all()).results || [];
+const syncTarget = survivors[0];
+const keepName = survivors[1];
+await api.onRequestPost({
+  request: request('/api/labels/sync', json({
+    labels: [{ id: syncTarget.id, productId: 1, matchedProductName: '測試商品', matchSource: 'manual', nameFromFile: '批次改名後的名稱' }]
+  })),
+  env
+});
+const synced = await db.prepare('SELECT name_from_file AS nf, product_id AS pid FROM labels WHERE id = ?').bind(syncTarget.id).first();
+check('labels/sync 會更新名稱（改名可批次補送）', synced.nf === '批次改名後的名稱', JSON.stringify(synced));
+check('labels/sync 會更新配對', synced.pid === 1, JSON.stringify(synced));
+const metaAfterSync = await (await api.onRequestGet({ request: request('/api/meta'), env })).json();
+check('配對／改名會遞增 labels_revision', Number(metaAfterSync.labelsRevision) > Number(metaBeforeSync.labelsRevision),
+  `${metaBeforeSync.labelsRevision} → ${metaAfterSync.labelsRevision}`);
+check('配對／改名「不會」遞增 products_revision（否則每次開頁都要重讀 22,481 列）',
+  metaAfterSync.productsRevision === metaBeforeSync.productsRevision,
+  `${metaBeforeSync.productsRevision} → ${metaAfterSync.productsRevision}`);
+const noName = await db.prepare('SELECT name_from_file AS nf FROM labels WHERE id = ?').bind(keepName.id).first();
+await api.onRequestPost({
+  request: request('/api/labels/sync', json({ labels: [{ id: keepName.id, productId: null, matchedProductName: null }] })),
+  env
+});
+const noNameAfter = await db.prepare('SELECT name_from_file AS nf FROM labels WHERE id = ?').bind(keepName.id).first();
+check('沒有帶名稱時不會把名稱清空', noNameAfter.nf === noName.nf, `${noName.nf} → ${noNameAfter.nf}`);
+
 console.log('\n=== 9b. 清除雲端資料 ===');
 const clearWrong = await (await api.onRequestPost({
   request: request('/api/cloud/clear', json({ scope: 'labels', confirm: '清' })), env

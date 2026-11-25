@@ -1093,3 +1093,60 @@ Excel 裡已移除的商品**雲端不會刪**（本機刪了，下次 bootstrap
 
 `label-edit-smoke` 99/99、`api-integration` 49/49、`excel-diff-smoke` 24/24、
 `ui-smoke`、`filetype-smoke` 全數通過。`sw-v6.js` → `v16`。
+
+---
+
+## 20. 「改名／配對沒有上傳到雲端」＋ D1 額度又被燒光（2026-11-25）
+
+### 症狀 1：改了名字，雲端沒更新
+
+`renameLabel()` 失敗時只說「稍後按『同步』會補送」，但**「同步」根本沒有送名稱**：
+
+```js
+// 舊 syncMatchMetadata() 只送這幾欄
+{ id, productId, matchedProductName, matchSource, matchScore, matchConfidence, matchGap, matchWhy }
+//                                                                    ↑ 沒有 nameFromFile
+```
+
+而且它每次都把 300 多個標籤**全部重送**（就算只改了一個）。
+
+修正：
+- 新增 **待上傳佇列**（`meta.pendingLabelSync`，IndexedDB 保存）：改名／配對／延後／批次重配／解除配對
+  都先記 id，雲端確認成功才清掉；失敗就一直留著
+- `syncMatchMetadata()` 改成**只送待上傳的那幾筆**，payload 加入 `nameFromFile`
+- `POST /api/labels/sync` 支援 `name_from_file = COALESCE(?, name_from_file)`（沒帶就不動）
+- 每次連線、每次按「同步」自動補送；狀態訊息顯示「還有 N 筆標籤改動尚未上傳」
+- **新版第一次連線做一次完整對帳**（`cloudLabelsReconciled` 標記），把舊版沒送出去的改名補上
+- 手動按「同步目前資料到雲端」＝完整對帳（所有標籤）
+
+### 症狀 2：D1 免費額度 7 小時又用完（500）
+
+根因：**配對／改名／刪除都會遞增 `products_revision`**，而前端看到商品版本變了就會重讀
+**22,481 列商品**。使用者昨天到今天不停在配對改名，每次改動之後任何裝置開頁都要重讀一次
+→ 5,000,000 列 ÷ 22,481 ≈ 222 次 bootstrap 就燒完。
+
+修正：
+- `labels/sync`、`PATCH /api/labels/:id`、`DELETE /api/labels/:id`、`labels/bulk-delete`
+  **不再遞增 `products_revision`**（只遞增 `labels_revision`）
+- 商品的標籤連結改成**由 labels 表推導**：新增 `relinkProductsFromLabels()`，開頁／同步後
+  用 `label.productId` 重建 `product.labelId`（本機 IndexedDB 一併更新）
+- 「同步」判斷商品是否有變動時**不再比對 `labelId`**
+
+效果：配對／改名再頻繁，商品版本都不會動 → 不會再重讀 22,481 列。
+
+### 測試
+
+`cloud-smoke` 新增情境 6、7、8（**13 項**）全部通過：
+
+```
+✅ 本機名稱已改 / 記下「待上傳」
+✅ 同步會把待上傳的送出去（含改好的名稱）
+✅ 送出成功後清空待上傳
+✅ 沒有改動時不會送任何標籤
+✅ 只有 1 筆改動時只送 1 筆（不是全部）
+✅ 配對／改名不會改動商品版本號 → 不會重新 bootstrap 22,481 列
+```
+
+`api-integration` 新增 9d（5 項）→ **54 / 54**：改名可批次補送、沒帶名稱不會清空、`labels_revision` 遞增
+但 `products_revision` 不變。`label-edit-smoke` 99/99、`excel-diff-smoke` 24/24、`ui-smoke`、
+`filetype-smoke`、`stress-test` 全部通過。`sw-v6.js` → `v17`。
