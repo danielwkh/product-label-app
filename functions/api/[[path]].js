@@ -119,6 +119,26 @@ async function ensureSchema(env) {
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_content_hash ON labels(content_hash)').run();
     await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_labels_uploaded ON labels(uploaded_at)').run();
     await ensureMetaTable(env);
+    // 一次性資料修正（對應 migrations/0006）：早期 .wdfx 的 mime 被存成 application/pdf，
+    // 手機就會把它當 PDF 下載、微打也打不開。只改 mime 欄位，不動檔案、不動配對。
+    // 用 meta 旗標確保只跑一次；額度用完時會失敗，等額度恢復後第一次請求會自動補做。
+    try {
+      const flag = await readMeta(env, ['mime_fix_0006']);
+      if (flag.mime_fix_0006 !== '1') {
+        await env.DB.prepare(`UPDATE labels SET mime = 'application/octet-stream'
+          WHERE filename IS NOT NULL AND lower(filename) NOT LIKE '%.pdf'
+            AND (mime IS NULL OR mime <> 'application/octet-stream')`).run();
+        await env.DB.prepare(`UPDATE labels SET mime = 'application/pdf'
+          WHERE filename IS NOT NULL AND lower(filename) LIKE '%.pdf'
+            AND (mime IS NULL OR mime <> 'application/pdf')`).run();
+        await env.DB.prepare(`INSERT INTO meta (key, value, updated_at) VALUES ('mime_fix_0006', '1', ?)
+          ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at`)
+          .bind(now()).run();
+      }
+    } catch (err) {
+      // 不影響主流程（讀檔的端點已經改用副檔名判斷類型），下次啟動再試
+      console.warn('mime fix 0006 skipped', String((err && err.message) || err));
+    }
     schemaReady = true;
     schemaError = null;
   } catch (err) {

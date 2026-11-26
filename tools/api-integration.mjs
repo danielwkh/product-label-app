@@ -176,6 +176,32 @@ await api.onRequestDelete({ request: request('/api/labels/wdfx-test-1', { method
 const wdfxGone = await db.prepare('SELECT COUNT(*) AS n FROM labels WHERE id = ?').bind('wdfx-test-1').first();
 check('測試標籤已清除（不影響後續統計）', wdfxGone.n === 0, String(wdfxGone.n));
 
+/* --------------- 5c. 一次性自動修正：舊資料的 mime（migrations/0006） --------------- */
+console.log('\n=== 5c. 舊資料 mime 自動修正（只跑一次）===');
+const staleSql = "SELECT COUNT(*) AS n FROM labels WHERE mime = 'application/pdf' AND lower(filename) NOT LIKE '%.pdf'";
+// 模擬早期上傳：.wdfx 被存成 application/pdf
+await db.prepare(`INSERT INTO labels (id, filename, name_from_file, r2_key, mime, uploaded_at, updated_at)
+  VALUES ('legacy-wdfx-1', '舊標籤.wdfx', '舊標籤', 'labels/legacy-wdfx-1.wdfx', 'application/pdf', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`).run();
+await db.prepare("DELETE FROM meta WHERE key = 'mime_fix_0006'").run();
+const staleBefore = await db.prepare(staleSql).first();
+check('（前置）有一批舊資料仍被標成 PDF', staleBefore.n > 0, `${staleBefore.n} 筆`);
+
+// 用全新的模組實例模擬「部署後第一次請求」（模組內的 schemaReady 會是 false）
+const fresh = await import('../functions/api/[[path]].js?mime-fix=1');
+const freshHealth = await fresh.onRequestGet({ request: request('/api/health'), env });
+check('額度正常時 /api/health 回 ok', freshHealth.status === 200, String(freshHealth.status));
+
+const staleAfter = await db.prepare(staleSql).first();
+check('啟動時自動把非 PDF 標籤改成 octet-stream', staleAfter.n === 0, `剩 ${staleAfter.n} 筆`);
+const pdfWrong = await db.prepare("SELECT COUNT(*) AS n FROM labels WHERE filename IS NOT NULL AND lower(filename) LIKE '%.pdf' AND mime <> 'application/pdf'").first();
+check('PDF 標籤仍然是 application/pdf', pdfWrong.n === 0, `${pdfWrong.n} 筆不符`);
+const legacyRow = await db.prepare("SELECT mime FROM labels WHERE id = 'legacy-wdfx-1'").first();
+check('那筆舊資料已被改成 octet-stream', legacyRow && legacyRow.mime === 'application/octet-stream', legacyRow && legacyRow.mime);
+await db.prepare("DELETE FROM labels WHERE id = 'legacy-wdfx-1'").run();
+
+const flagRow = await db.prepare("SELECT value FROM meta WHERE key = 'mime_fix_0006'").first();
+check('記錄旗標，之後不會重複全表改寫', flagRow && flagRow.value === '1', flagRow && flagRow.value);
+
 /* 6. 批次同步配對 */
 console.log('\n=== 6. 批次同步 174 筆配對 ===');
 const matchRows = uploaded.map((item, index) => ({

@@ -1293,4 +1293,10 @@ Excel 裡已移除的商品**雲端不會刪**（本機刪了，下次 bootstrap
 「分享選單 → 微打」；Android 是「分享 → 微打」或「開啟方式 → 微打」。檔案本身必須是 `.wdfx`，
 所以本頁不再提供 PDF 給 WePrint，只有該商品真的沒有 `.wdfx` 時才會提示。
 
+**舊資料自動修正（不用手動跑 SQL）**：`migrations/0006` 的內容已內建到 `ensureSchema()`，
+部署後第一次請求就會把「檔名不是 .pdf 但 mime 被存成 application/pdf」的列改成
+`application/octet-stream`（只改 mime 欄位，不動檔案、不動配對），並在 `meta` 寫 `mime_fix_0006 = 1`
+確保只跑一次。若當時 D1 額度用完會自動跳過，額度恢復後第一次請求再補做。
+（`api-integration` 新增 §5c 6 項驗證這個自動修正。）
+
 `sw-v6.js` → `v21`。
