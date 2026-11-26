@@ -91,7 +91,13 @@ export function createApi({ base = './api/', fetchImpl } = {}) {
       form.append('hash', label.hash || '');
       form.append('size', String(label.size || (file && file.size) || 0));
       form.append('filename', label.filename || 'label.pdf');
-      form.append('mime', label.mime || 'application/pdf');
+      form.append('mime', (() => {
+        const name = String(label.filename || file.name || '');
+        const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : String(label.ext || 'pdf');
+        return ext === 'pdf' ? 'application/pdf'
+          : /^(png|jpe?g|webp|gif)$/.test(ext) ? `image/${ext.replace('jpg', 'jpeg')}`
+            : 'application/octet-stream';
+      })());
       form.append('ext', label.ext || 'pdf');
       form.append('nameFromFile', label.nameFromFile || label.filename || '');
       form.append('productId', label.productId == null ? '' : String(label.productId));

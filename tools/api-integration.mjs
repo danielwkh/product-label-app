@@ -136,6 +136,46 @@ response = await api.onRequestGet({
 const partial = new Uint8Array(await response.arrayBuffer());
 check('Range 請求回 206 且只傳 1KB', response.status === 206 && partial.length === 1024, `${response.status}, ${partial.length} bytes, ${response.headers.get('content-range')}`);
 
+
+/* ------------------------- 5b. 非 PDF 檔（.wdfx）不可以被當成 PDF 送出去 */
+console.log('\n=== 5b. .wdfx 的類型與檔名 ===');
+const wdfxBytes = new Uint8Array([0x57, 0x44, 0x46, 0x58, 0x00, 0x01, 0x02, 0x03]);
+const wdfxForm = new FormData();
+wdfxForm.append('file', new File([wdfxBytes], '測試標籤.wdfx', { type: 'application/pdf' }), '測試標籤.wdfx');
+wdfxForm.append('id', 'wdfx-test-1');
+wdfxForm.append('hash', 'hash-wdfx-1');
+wdfxForm.append('filename', '測試標籤.wdfx');
+wdfxForm.append('mime', 'application/pdf');          // 故意送錯：伺服器必須自己依副檔名修正
+wdfxForm.append('ext', 'wdfx');
+const wdfxRes = await api.onRequestPost({ request: request('/api/labels', { method: 'POST', body: wdfxForm }), env });
+check('.wdfx 可以上傳', wdfxRes.status === 200, String(wdfxRes.status));
+
+const wdfxRow = await db.prepare('SELECT mime, filename FROM labels WHERE id = ?').bind('wdfx-test-1').first();
+check('資料表不會把它存成 application/pdf', wdfxRow.mime === 'application/octet-stream', wdfxRow.mime);
+
+const wdfxHead = await r2.head('labels/wdfx-test-1.wdfx');
+check('R2 的 Content-Type 也是 octet-stream', wdfxHead.httpMetadata.contentType === 'application/octet-stream',
+  wdfxHead.httpMetadata.contentType);
+
+const wdfxFile = await api.onRequestGet({ request: request('/api/labels/wdfx-test-1/file'), env });
+check('下載時 content-type 不是 PDF', wdfxFile.headers.get('content-type') === 'application/octet-stream',
+  wdfxFile.headers.get('content-type'));
+const disposition = wdfxFile.headers.get('content-disposition') || '';
+check('檔名保留 .wdfx 副檔名', /wdfx/i.test(decodeURIComponent(disposition)), disposition);
+check('非 PDF 一律用 attachment（不會被瀏覽器當成 PDF 開啟）', /attachment/.test(disposition), disposition);
+
+// 舊資料：mime 寫錯成 application/pdf，但檔名是 .wdfx → 仍要修正
+await db.prepare("UPDATE labels SET mime = 'application/pdf' WHERE id = 'wdfx-test-1'").run();
+const legacyFile = await api.onRequestGet({ request: request('/api/labels/wdfx-test-1/file'), env });
+check('舊資料 mime 寫錯時，仍以副檔名為準', legacyFile.headers.get('content-type') === 'application/octet-stream',
+  legacyFile.headers.get('content-type'));
+await db.prepare("UPDATE labels SET mime = 'application/octet-stream' WHERE id = 'wdfx-test-1'").run();
+
+// 清掉這個測試標籤，避免影響後面的數量統計
+await api.onRequestDelete({ request: request('/api/labels/wdfx-test-1', { method: 'DELETE' }), env });
+const wdfxGone = await db.prepare('SELECT COUNT(*) AS n FROM labels WHERE id = ?').bind('wdfx-test-1').first();
+check('測試標籤已清除（不影響後續統計）', wdfxGone.n === 0, String(wdfxGone.n));
+
 /* 6. 批次同步配對 */
 console.log('\n=== 6. 批次同步 174 筆配對 ===');
 const matchRows = uploaded.map((item, index) => ({

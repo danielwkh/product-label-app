@@ -1256,3 +1256,41 @@ Excel 裡已移除的商品**雲端不會刪**（本機刪了，下次 bootstrap
 
 其餘：`ui-smoke` 全部通過、`match-engine 23/23`、`excel-diff 24/24`、`cloud` 全部、`api 54/54`、
 `filetype 28/28`。`sw-v6.js` → `v20`。
+
+---
+
+## 23. `.wdfx` 被當成 PDF 的問題（WePrint / 微打）
+
+**症狀**：iPhone 分享選單有檔案但用途不清；按下網頁按鈕開不了；Android 下載到手的是 **PDF**。
+
+**真正原因（三處，全部在伺服器端的「相信資料庫」與用戶端的預設值）**
+
+1. `labelMime()` 預設回傳 `application/pdf`，未知副檔名一律變 PDF。
+2. 上傳 `POST /api/labels` 沒收到 `mime` 就寫 `application/pdf`，所以 `.wdfx` 入庫就被標成 PDF。
+3. `labels/:id/file` 直接信 `row.mime`，把 `.wdfx` 內容用 `application/pdf` 送出去 → Android 瀏覽器照 MIME 命名/用 PDF 檢視器開。
+
+另外，同一個商品同時有 `PDF` 和 `WDFX` 兩份時，舊的 `labelsByProductId()` 取「先找到的那份」，常拿到 PDF。
+
+**修正**
+
+| 位置 | 改動 |
+| --- | --- |
+| `js/app.js` | `labelMime()` 改由副檔名決定（pdf→`application/pdf`、圖檔→`image/*`、其餘→`application/octet-stream`）；`asFile()` 同 |
+| `js/app.js` | `labelPreference()`：同商品 **非 PDF 優先**（`.wdfx` 優先），`labelsByProductId()` 全部改用它 |
+| `js/app.js` | `fileNameFor()`：分享／下載的檔名一律 `.wdfx`；`shareLabel(id, blob)` 可先取好 blob 再分享（iOS 要在點擊的同一拍內呼叫 share） |
+| `js/app.js` | `shareLabel()` 先以正確類型分享；若系統不接受才改用 `application/pdf` 讓 App 出現，**檔名仍是 `.wdfx`** |
+| `js/app.js` | 下載提示分平台：Android「點該檔案 →「開啟方式」→ 選微打 / WePrint」；iPhone「檔案 App → 長按 → 分享 → 微打」 |
+| `js/app.js` | 掃碼台 `prefetchScanFile()`：查到標籤就先把 blob 抓好，卡片顯示「✓ 檔案已準備好，按「WePrint」直接分享」；只有 PDF 版本時警告「⚠️ 這是 PDF 版本」 |
+| `functions/api/[[path]].js` | 檔案端點改用副檔名決定 `Content-Type` 與 `Content-Disposition`（非 PDF 用 `attachment` + `.wdfx` 檔名） |
+| `functions/api/[[path]].js`／`js/store/api.js` | 上傳時 `mime` 由副檔名計算，不再預設 PDF |
+| `migrations/0006_fix_label_mime.sql` | 一次性修正既有 `labels.mime`（依檔名） |
+
+**測試**：`api-integration 62/62`（新增 §5b 7 項，含「舊資料 mime 錯誤也要正確送出」），
+`label-edit 152/152`（新增 §15 12 項：類型、檔名、.wdfx 優先、掃碼台預抓、分享、下載提示），
+`filetype 30/30`、`ui-smoke` 全部、`match-engine 23/23`、`excel-diff 24/24`、`cloud` 全部。
+
+**平台限制（要跟操作員說清楚）**：手機瀏覽器**不能**直接叫起另一個 App。iPhone 唯一的路是
+「分享選單 → 微打」；Android 是「分享 → 微打」或「開啟方式 → 微打」。檔案本身必須是 `.wdfx`，
+所以本頁不再提供 PDF 給 WePrint，只有該商品真的沒有 `.wdfx` 時才會提示。
+
+`sw-v6.js` → `v21`。

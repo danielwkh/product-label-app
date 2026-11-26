@@ -676,6 +676,85 @@ check('分頁順序：掃碼台 → 搜尋 → 配對管理 → 上傳',
   tabLabels[0].includes('掃碼台') && tabLabels[1].includes('搜尋') && tabLabels[2].includes('配對管理') && tabLabels[3].includes('上傳'),
   tabLabels.join(' | '));
 
+/* ---------------- 15. 檔案類型與 WePrint 分享（.wdfx 不可以變成 PDF） */
+console.log('\n=== 15. 檔案類型與 WePrint 分享 ===');
+
+check('.wdfx 即使 mime 寫錯也要當成 octet-stream',
+  window.app.labelMime({ filename: 'a.wdfx', mime: 'application/pdf' }) === 'application/octet-stream',
+  window.app.labelMime({ filename: 'a.wdfx', mime: 'application/pdf' }));
+check('.pdf 才是 application/pdf',
+  window.app.labelMime({ filename: 'a.pdf', mime: 'application/octet-stream' }) === 'application/pdf');
+check('沒有副檔名時用 ext 欄位',
+  window.app.labelMime({ filename: 'x', ext: 'wdfx' }) === 'application/octet-stream');
+check('檔名會保留副檔名', window.app.fileNameFor({ filename: 'b.wdfx' }) === 'b.wdfx'
+  && window.app.fileNameFor({ filename: 'c', ext: 'wdfx' }) === 'c.wdfx',
+  `${window.app.fileNameFor({ filename: 'b.wdfx' })} / ${window.app.fileNameFor({ filename: 'c', ext: 'wdfx' })}`);
+
+const fileObj = window.app.asFile(new window.Blob(['x']), 'd.wdfx');
+check('包成 File 時類型不是 PDF', fileObj.type === 'application/octet-stream', fileObj.type);
+
+// 同一商品同時有 PDF 與 .wdfx → 掃碼台要選 .wdfx
+state.products = [{ id: 601, name: '莫小希沙琪瑪 南瓜籽', barcode: '6932965112211', barcode2: '', labelId: null }];
+state.labels = {
+  'p-pdf': makeLabel('p-pdf', 'hash-p1', '莫小希沙琪瑪南瓜籽', {
+    productId: 601, matchedProductName: '莫小希沙琪瑪 南瓜籽', uploaded: true, ext: 'pdf',
+    filename: '莫小希沙琪瑪南瓜籽_標籤_7x4cm.pdf', uploadedAt: '2026-11-20T00:00:00Z'
+  }),
+  'p-wdfx': makeLabel('p-wdfx', 'hash-p2', '莫小希沙琪瑪南瓜籽', {
+    productId: 601, matchedProductName: '莫小希沙琪瑪 南瓜籽', uploaded: true, ext: 'wdfx',
+    filename: '莫小希沙琪瑪南瓜籽_標籤_7x4cm.wdfx', uploadedAt: '2026-11-19T00:00:00Z'
+  })
+};
+const chosen = window.app.labelForProduct(601);
+check('同一商品有 PDF 與 .wdfx → 優先 .wdfx', chosen && chosen.id === 'p-wdfx',
+  chosen ? chosen.filename : 'null');
+
+// 掃碼台顯示的卡片要用 .wdfx
+window.app.switchTab('scan');
+document.getElementById('scanDeskInput').value = '6932965112211';
+window.app.scanDeskLookup();
+await wait(120);
+const scanCard = document.getElementById('scanDeskCard');
+check('掃碼台顯示 .wdfx 而不是 PDF', /wdfx/i.test(scanCard.textContent) && !/\.pdf/i.test(scanCard.textContent),
+  scanCard.textContent.replace(/\s+/g, ' ').slice(0, 90));
+
+// 分享：用已預抓的 blob，檔名要保留 .wdfx
+const shared = [];
+Object.defineProperty(window.navigator, 'share', {
+  value: async payload => { shared.push(payload); }, configurable: true
+});
+Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+Object.defineProperty(globalThis.navigator, 'share', { value: window.navigator.share, configurable: true });
+Object.defineProperty(globalThis.navigator, 'canShare', { value: window.navigator.canShare, configurable: true });
+
+state.blobCache.set('p-wdfx', new window.Blob(['WD F X'], { type: 'application/octet-stream' }));
+await window.app.shareLabel('p-wdfx');
+await wait(80);
+check('分享會打開系統分享選單', shared.length === 1, `呼叫 ${shared.length} 次`);
+const sharedFile = shared[0] && shared[0].files && shared[0].files[0];
+check('分享的檔名是 .wdfx', Boolean(sharedFile) && /\.wdfx$/.test(sharedFile.name), sharedFile && sharedFile.name);
+check('分享的類型不是 application/pdf', Boolean(sharedFile) && sharedFile.type === 'application/octet-stream',
+  sharedFile && sharedFile.type);
+
+// 沒有分享 API 時 → 下載（檔名仍要是 .wdfx）
+Object.defineProperty(window.navigator, 'share', { value: undefined, configurable: true });
+Object.defineProperty(globalThis.navigator, 'share', { value: undefined, configurable: true });
+const downloads2 = [];
+const originalCreate2 = globalThis.URL.createObjectURL;
+globalThis.URL.createObjectURL = () => 'blob:mock';
+const clickNames = [];
+const originalClick2 = window.HTMLAnchorElement.prototype.click;
+window.HTMLAnchorElement.prototype.click = function () { clickNames.push(this.download); };
+window.app.fallbackDownload(window.app.asFile(new window.Blob(['x']), 'e.wdfx'));
+await wait(60);
+check('不支援分享時改為下載，檔名仍是 .wdfx',
+  clickNames.length === 1 && /\.wdfx$/.test(clickNames[0]), clickNames.join(','));
+check('下載提示會說明如何用微打開啟',
+  /微打|WePrint/.test(document.getElementById('toast').textContent),
+  document.getElementById('toast').textContent);
+window.HTMLAnchorElement.prototype.click = originalClick2;
+globalThis.URL.createObjectURL = originalCreate2;
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

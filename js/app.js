@@ -51,7 +51,9 @@ const state = {
   blobCache: new Map(),
   tombstones: {},              // 已刪除但雲端還沒確認的標籤 id → 刪除時間（防「刪了又復活」）
   pendingLabelSync: new Set(), // 改名／配對改了但雲端還沒確認的標籤 id → 下次同步補送
-  scanRecent: []               // 掃碼台「最近掃過」
+  scanRecent: [],              // 掃碼台「最近掃過」
+  scanDeskBlob: null,          // 掃碼台已預抓的檔案（依 id）
+  scanDeskPreparing: false
 };
 
 /* --------------------------------------------------------------- 小工具 */
@@ -1522,14 +1524,25 @@ async function deleteAllPdf() {
 
 const SCAN_RECENT_LIMIT = 12;
 
+function labelPreference(label) {
+  // 分數越高越優先：你要印的是 .wdfx（不是 PDF）→ 已上傳 → 較新
+  let score = 0;
+  const ext = String((label && (formatOf(label) || label.ext)) || '').toLowerCase();
+  if (ext && ext !== 'pdf') score += 100;      // 非 PDF（例如 .wdfx）優先
+  if (label && label.uploaded) score += 10;
+  return score;
+}
+
 function labelsByProductId() {
   const map = new Map();
   for (const label of Object.values(state.labels)) {
     if (label.productId == null) continue;
     const id = Number(label.productId);
     const current = map.get(id);
-    // 同一個商品若有多個標籤，優先顯示已上傳、有檔案的
-    if (!current || (label.uploaded && !current.uploaded)) map.set(id, label);
+    if (!current) { map.set(id, label); continue; }
+    const diff = labelPreference(label) - labelPreference(current);
+    if (diff > 0) map.set(id, label);
+    else if (diff === 0 && String(label.uploadedAt || '') > String(current.uploadedAt || '')) map.set(id, label);
   }
   return map;
 }
@@ -1595,6 +1608,7 @@ function scanDeskShowProduct(product, extra = '') {
     return;
   }
   const ext = (formatOf(label) || '').toUpperCase();
+  const isPdf = (formatOf(label) || '').toLowerCase() === 'pdf';
   card.className = 'scan-card';
   card.innerHTML = `
     <div class="scan-name">${escapeHtml(product.name)}</div>
@@ -1602,10 +1616,37 @@ function scanDeskShowProduct(product, extra = '') {
     <div class="scan-label">📄 ${escapeHtml(label.nameFromFile || label.filename)} <b>${ext}</b></div>
     <div class="scan-actions">
       <button class="btn" data-scan-action="preview" data-id="${escapeHtml(label.id)}">👁 預覽</button>
-      <button class="btn btn-primary" data-scan-action="share" data-id="${escapeHtml(label.id)}">🖨 WePrint</button>
+      <button class="btn btn-primary" data-scan-action="share" data-id="${escapeHtml(label.id)}"${state.scanDeskPreparing ? ' disabled' : ''}>🖨 WePrint</button>
       <button class="btn" data-scan-action="download" data-id="${escapeHtml(label.id)}">⬇ 下載</button>
-    </div>`;
+    </div>
+    <div class="scan-meta" id="scanDeskFileHint">${state.scanDeskPreparing ? '正在準備檔案…' : (isPdf ? '⚠️ 這是 PDF 版本（若有 .wdfx 會優先使用 .wdfx）' : '')}</div>`;
   pushScanRecent({ code: product.barcode || '', name: product.name, productId: product.id });
+  prefetchScanFile(label);
+}
+
+/** 掃到商品時就先抓檔案，讓「WePrint」一按就開分享（iOS 才不會因為等待網路而被擋） */
+async function prefetchScanFile(label) {
+  if (!label) return;
+  state.scanDeskPreparing = true;
+  const hint = () => $('scanDeskFileHint');
+  try {
+    const blob = await getLabelBlob(label);
+    state.scanDeskBlob = { id: label.id, blob };
+    const el = hint();
+    if (el && state.scanDeskBlob && state.scanDeskBlob.id === label.id) {
+      el.textContent = '✓ 檔案已準備好，按「WePrint」直接開分享';
+    }
+  } catch (err) {
+    state.scanDeskBlob = null;
+    const el = hint();
+    if (el) {
+      el.innerHTML = `⚠️ ${escapeHtml(err.message)}<br><span style="color:#b91c1c">可先按「下載」或等雲端恢復</span>`;
+    }
+  } finally {
+    state.scanDeskPreparing = false;
+    const btn = document.querySelector('#scanDeskCard [data-scan-action="share"]');
+    if (btn) btn.disabled = false;
+  }
 }
 
 function scanDeskNotFound(code) {
@@ -2315,10 +2356,14 @@ async function getLabelBlob(label) {
   }
   if (!blob && (label.uploaded || label.remote)) {
     const response = await fetch(api.labelFileUrl(label.id), { cache: 'no-store' });
-    if (!response.ok) throw new Error('無法從雲端下載 PDF');
+    if (!response.ok) {
+      let detail = '';
+      try { detail = (await response.json()).error || ''; } catch { /* ignore */ }
+      throw new Error(humanizeCloudError(detail || `雲端回應 ${response.status}`));
+    }
     blob = await response.blob();
   }
-  if (!blob) throw new Error('此標籤沒有可用的 PDF（本機與雲端都沒有）');
+  if (!blob) throw new Error('這個檔案不在這台裝置上，雲端也暫時拿不到');
   // 只保留最近 3 個在記憶體，避免 iPhone 記憶體爆掉
   if (state.blobCache.size >= 3) state.blobCache.delete(state.blobCache.keys().next().value);
   state.blobCache.set(label.id, blob);
@@ -2326,13 +2371,26 @@ async function getLabelBlob(label) {
 }
 
 function asFile(blob, name, type) {
-  return new File([blob], name || 'label.pdf', { type: type || 'application/pdf' });
+  const filename = String(name || 'label.pdf');
+  const lower = filename.toLowerCase();
+  const guessed = lower.endsWith('.pdf') ? 'application/pdf'
+    : /\.(png|jpe?g|webp|gif)$/.test(lower) ? `image/${lower.split('.').pop().replace('jpg', 'jpeg')}`
+      : 'application/octet-stream';
+  return new File([blob], filename, { type: type || guessed });
 }
 
+/**
+ * 檔案類型一律以「副檔名」為準。
+ * 為什麼：早期 .wdfx 被存成 mime=application/pdf，於是手機下載會變成 PDF、
+ * 或 WePrint 收到的類型不對而拒絕開啟。這裡強制修正。
+ */
 function labelMime(label) {
-  if (label && label.mime) return label.mime;
-  const kind = label && label.kind ? label.kind : 'pdf';
-  return kind === 'pdf' ? 'application/pdf' : 'application/octet-stream';
+  const name = String((label && (label.filename || label.nameFromFile)) || '');
+  const fromName = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  const ext = fromName || String((label && label.ext) || '').toLowerCase();
+  if (ext === 'pdf') return 'application/pdf';
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) return `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+  return 'application/octet-stream';
 }
 
 function fallbackDownload(file) {
@@ -2344,26 +2402,55 @@ function fallbackDownload(file) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('已下載，請手動分享到 WePrint');
+  const ua = navigator.userAgent || '';
+  const hint = /Android/i.test(ua)
+    ? '已下載到「下載」資料夾：點該檔案 →「開啟方式」→ 選微打 / WePrint'
+    : /iPhone|iPad|iPod/i.test(ua)
+      ? '已儲存到「檔案」App：長按檔案 → 分享 → 選微打 / WePrint'
+      : '已下載，請用 WePrint / 微打 開啟';
+  toast(hint, 5200);
 }
 
-async function shareLabel(id) {
+function fileNameFor(label) {
+  const name = String((label && (label.filename || '')) || '');
+  if (name.includes('.')) return name;
+  const ext = (label && label.ext) || 'pdf';
+  return `${name || 'label'}.${ext}`;
+}
+
+/** 有 blob 就直接分享／下載；沒有才去抓（iOS 分享必須在使用者點擊的當下） */
+async function shareLabel(id, providedBlob) {
   const label = state.labels[id];
   if (!label) {
     toast('找不到標籤資料');
     return;
   }
+  const filename = fileNameFor(label);
+  const mime = labelMime(label);
   try {
-    const blob = await getLabelBlob(label);
-    const file = asFile(blob, label.filename || `label.${label.ext || 'pdf'}`, labelMime(label));
-    if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
-      await navigator.share({ files: [file], title: label.nameFromFile || label.filename, text: '營養標籤' });
-      toast('已開啟分享選單');
-    } else {
-      fallbackDownload(file);
+    if (!providedBlob && !state.blobCache.has(id)) {
+      // 先給使用者「正在準備」的回饋，避免看起來沒反應
+      toast(`正在準備 ${filename}…`, 1200);
     }
+    const blob = providedBlob || await getLabelBlob(label);
+    // 先用手上正確的類型（.wdfx → octet-stream）。
+    // 若系統不接受（有些 App 只出現在 PDF 類型下），才用 application/pdf 再試一次，
+    // 但檔名仍然是 .wdfx —— 使用者要的是 .wdfx，不是 PDF。
+    const typeCandidates = mime === 'application/pdf' ? [mime] : [mime, 'application/pdf'];
+    if (navigator.share) {
+      for (const type of typeCandidates) {
+        const file = asFile(blob, filename, type);
+        const acceptable = !navigator.canShare || navigator.canShare({ files: [file] });
+        if (!acceptable) continue;
+        await navigator.share({ files: [file], title: label.nameFromFile || filename });
+        toast('已開啟分享選單，選「微打 / WePrint」即可');
+        return;
+      }
+    }
+    fallbackDownload(asFile(blob, filename, mime));
   } catch (err) {
-    toast(`找不到標籤檔案：${err.message}`);
+    if (err && err.name === 'AbortError') return;         // 使用者取消分享
+    toast(`無法取得檔案：${err.message}`);
   }
 }
 
@@ -2585,7 +2672,10 @@ function bindEvents() {
       if (!btn) return;
       const action = btn.dataset.scanAction;
       if (action === 'preview') previewLabel(btn.dataset.id);
-      else if (action === 'share') shareLabel(btn.dataset.id);
+      else if (action === 'share') {
+        const cached = state.scanDeskBlob && state.scanDeskBlob.id === btn.dataset.id ? state.scanDeskBlob.blob : null;
+        shareLabel(btn.dataset.id, cached);
+      }
       else if (action === 'download') {
         const label = state.labels[btn.dataset.id];
         if (!label) return;
@@ -3247,6 +3337,12 @@ window.app = {
   openToolsModal,
   scanDeskLookup,
   scanDeskShowProduct,
+  labelMime,
+  fileNameFor,
+  fallbackDownload,
+  asFile,
+  shareLabel,
+  prefetchScanFile,
   findProductByCode,
   findLabeledProductsByName,
   labelsByProductId,

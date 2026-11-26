@@ -266,14 +266,26 @@ export async function onRequestGet({ request, env, context }) {
     const row = await env.DB.prepare('SELECT r2_key, filename, mime FROM labels WHERE id = ?').bind(id).first();
     if (!row) return json({ error: 'Label not found' }, 404);
 
-    const storedMime = row.mime || 'application/pdf';
+    // ⚠️ 類型一律以「檔名副檔名」為準：
+    //    早期 .wdfx 被存成 mime=application/pdf，手機下載會變成 PDF 或打不開，
+    //    所以這裡修正（不再信任資料表裡的 mime，除非檔名真的是 .pdf）。
+    const filename = row.filename || 'label.pdf';
+    const hasExt = filename.includes('.');
+    const ext = hasExt ? filename.split('.').pop().toLowerCase() : '';
+    const pdfFile = ext === 'pdf' || (!hasExt && (row.mime || '').includes('pdf'));
+    const storedMime = pdfFile
+      ? 'application/pdf'
+      : /^(png|jpe?g|webp|gif)$/.test(ext)
+        ? `image/${ext.replace('jpg', 'jpeg')}`
+        : 'application/octet-stream';
     const wantsDownload = url.searchParams.get('download') === '1';
     const rangeHeader = request.headers.get('range');
     const headers = new Headers();
     headers.set('content-type', storedMime);
     headers.set('accept-ranges', 'bytes');
+    // 副檔名一定要保留，否則 Android / WePrint 認不出檔案類型
     headers.set('content-disposition',
-      `${wantsDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(row.filename || 'label')}`);
+      `${wantsDownload || !pdfFile ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(filename)}; filename="${encodeURIComponent(filename)}"`);
     headers.set('cache-control', 'private, max-age=3600');
 
     if (rangeHeader) {
@@ -293,7 +305,7 @@ export async function onRequestGet({ request, env, context }) {
     }
 
     const object = await env.LABELS.get(row.r2_key);
-    if (!object) return json({ error: 'PDF object not found' }, 404);
+    if (!object) return json({ error: '檔案不存在於雲端儲存（R2）' }, 404);
     const metadata = object.httpMetadata || {};
     headers.set('content-type', metadata.contentType || 'application/pdf');
     headers.set('content-length', String(object.size));
@@ -522,7 +534,13 @@ export async function onRequestPost({ request, env }) {
     const size = Number(form.get('size') || file.size || 0);
     const originalName = String(form.get('filename') || file.name || '');
     const ext = String(form.get('ext') || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase().slice(0, 8) || 'pdf';
-    const mime = String(form.get('mime') || file.type || 'application/pdf').slice(0, 120);
+    // 一律依副檔名決定 mime（表單送什麼都不信），否則 .wdfx 會被存成 PDF
+    const mimeFromExt = ext === 'pdf'
+      ? 'application/pdf'
+      : /^(png|jpe?g|webp|gif)$/.test(ext)
+        ? `image/${ext.replace('jpg', 'jpeg')}`
+        : 'application/octet-stream';
+    const mime = mimeFromExt;
     const key = `labels/${id}.${ext}`;
 
     // 同一個 id（= 內容 + 檔名 hash）且 R2 已有物件 → 不重寫

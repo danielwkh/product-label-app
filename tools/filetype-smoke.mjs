@@ -191,7 +191,22 @@ Object.defineProperty(globalThis.navigator, 'share', {
 Object.defineProperty(globalThis.navigator, 'canShare', { value: () => true, configurable: true });
 await window.app.shareLabel(pdfLabel.id);
 check('分享出去的檔名保留 .wdfx', sharedFile && sharedFile.name === '洗髮精 400ml.wdfx', sharedFile && sharedFile.name);
-check('分享出去的類型是 PDF（WePrint 靠這個判斷）', sharedFile && sharedFile.type === 'application/pdf', sharedFile && sharedFile.type);
+check('分享出去用正確類型（.wdfx → octet-stream，不是 PDF）',
+  sharedFile && sharedFile.type === 'application/octet-stream', sharedFile && sharedFile.type);
+
+// 系統不接受 octet-stream 時，退回用 application/pdf 讓 App 出現——但檔名仍是 .wdfx
+let fallbackShare = null;
+Object.defineProperty(globalThis.navigator, 'canShare', {
+  value: payload => payload.files[0].type === 'application/pdf', configurable: true
+});
+Object.defineProperty(globalThis.navigator, 'share', {
+  value: async payload => { fallbackShare = payload.files[0]; }, configurable: true
+});
+await window.app.shareLabel(pdfLabel.id);
+check('系統只接受 PDF 時改用 PDF 類型分享', fallbackShare && fallbackShare.type === 'application/pdf',
+  fallbackShare && fallbackShare.type);
+check('但檔名仍然是 .wdfx（不是 PDF）', fallbackShare && fallbackShare.name === '洗髮精 400ml.wdfx',
+  fallbackShare && fallbackShare.name);
 
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
