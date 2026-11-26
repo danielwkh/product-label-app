@@ -57,7 +57,7 @@ const D1_BATCH_SIZE = 50;
 let schemaReady = false;
 let schemaError = null;
 
-const BUILD = 'mime-fix-1';
+const BUILD = 'r2-cache-1';
 
 const isQuotaError = message => /exceeded|free tier|row read|daily|1101|quota/i.test(String(message || ''));
 
@@ -149,6 +149,68 @@ async function ensureSchema(env) {
   }
 }
 
+/*
+ * 大表快取（R2）：把「整個商品表 / 標籤表」的查詢結果存成一份 JSON，
+ * 用 revision 驗證是否還新鮮。這樣就算邊緣快取失效、換了資料中心，
+ * 也只花 1 次 R2 讀取，而不是 22,481 次 D1 列讀取。
+ * 沒有 R2 binding 時自動退回直接查 D1（功能不受影響，只是比較貴）。
+ */
+const PRODUCTS_CACHE_KEY = 'cache/products.json';
+const LABELS_CACHE_KEY = 'cache/labels.json';
+
+async function readTableCache(env, key, expectedRevision) {
+  if (!env.LABELS) return null;
+  try {
+    const object = await env.LABELS.get(key);
+    if (!object) return null;
+    const parsed = JSON.parse(await object.text());
+    if (String(parsed.revision) !== String(expectedRevision)) return null;
+    return Array.isArray(parsed.rows) ? parsed.rows : null;
+  } catch (err) {
+    console.warn('readTableCache failed', key, String((err && err.message) || err));
+    return null;
+  }
+}
+
+function writeTableCache(env, key, revision, rows, context) {
+  if (!env.LABELS) return;
+  try {
+    const put = env.LABELS.put(key, JSON.stringify({ revision: String(revision), rows, savedAt: now() }), {
+      httpMetadata: { contentType: 'application/json; charset=utf-8' }
+    }).catch(err => console.warn('writeTableCache failed', key, String((err && err.message) || err)));
+    if (context && typeof context.waitUntil === 'function') context.waitUntil(put);
+  } catch (err) {
+    console.warn('writeTableCache failed', key, String((err && err.message) || err));
+  }
+}
+
+const PRODUCTS_SQL = 'SELECT id, name, barcode, barcode2, label_id AS labelId, updated_at AS updatedAt FROM products ORDER BY id';
+const LABELS_SQL = `SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
+        matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
+        match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
+        content_hash AS hash, size, mime, deferred, uploaded_at AS uploadedAt, updated_at AS updatedAt
+      FROM labels ORDER BY uploaded_at`;
+
+/** 讀商品表：先看 R2 快取，沒有才真的掃 D1（掃完順手寫回快取） */
+async function loadProducts(env, revision, context) {
+  const cached = await readTableCache(env, PRODUCTS_CACHE_KEY, revision);
+  if (cached) return cached;
+  const result = await env.DB.prepare(PRODUCTS_SQL).all();
+  const rows = result.results || [];
+  writeTableCache(env, PRODUCTS_CACHE_KEY, revision, rows, context);
+  return rows;
+}
+
+/** 讀標籤表：同上 */
+async function loadLabels(env, revision, context) {
+  const cached = await readTableCache(env, LABELS_CACHE_KEY, revision);
+  if (cached) return cached;
+  const result = await env.DB.prepare(LABELS_SQL).all();
+  const rows = result.results || [];
+  writeTableCache(env, LABELS_CACHE_KEY, revision, rows, context);
+  return rows;
+}
+
 /* --------------------------------------------------------------- GET */
 
 export async function onRequestGet({ request, env, context }) {
@@ -213,14 +275,18 @@ export async function onRequestGet({ request, env, context }) {
     });
   }
 
-  /* 只取標籤清單（通常只有幾十~幾百列，比整包商品便宜很多） */
+  /* 只取標籤清單：先看 R2 快取（用 labels_revision 驗證），沒有才掃 D1 */
   if (url.pathname.endsWith('/api/labels')) {
-    const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
-        matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
-        match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, mime, deferred, uploaded_at AS uploadedAt, updated_at AS updatedAt
-      FROM labels ORDER BY uploaded_at`).all();
-    return json({ labels: labels.results || [], cloud: true });
+    const meta = await readMeta(env, ['labels_revision']);
+    const labelsRev = String(meta.labels_revision || '0');
+    const labels = await loadLabels(env, labelsRev, context);
+    return new Response(JSON.stringify({ labels, cloud: true, labelsRevision: labelsRev }), {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-table-cache': 'revision-verified'
+      }
+    });
   }
 
   if (url.pathname.endsWith('/api/bootstrap')) {
@@ -250,17 +316,13 @@ export async function onRequestGet({ request, env, context }) {
       } catch { /* 快取不可用就照常查詢 */ }
     }
 
-    const products = await env.DB.prepare(
-      'SELECT id, name, barcode, barcode2, label_id AS labelId, updated_at AS updatedAt FROM products ORDER BY id'
-    ).all();
-    const labels = await env.DB.prepare(`SELECT id, filename, name_from_file AS nameFromFile, product_id AS productId,
-        matched_product_name AS matchedProductName, match_source AS matchSource, match_score AS matchScore,
-        match_confidence AS matchConfidence, match_gap AS matchGap, match_why AS matchWhy,
-        content_hash AS hash, size, mime, deferred, uploaded_at AS uploadedAt, updated_at AS updatedAt
-      FROM labels ORDER BY uploaded_at`).all();
+    // 兩張大表都先看 R2 快取：換了資料中心 / 快取過期時，只花 R2 讀取，
+    // 不會再掃 22,481 列商品把 D1 每日額度燒掉。
+    const products = await loadProducts(env, revisionParts.products, context);
+    const labels = await loadLabels(env, revisionParts.labels, context);
     const payload = {
-      products: products.results || [],
-      labels: labels.results || [],
+      products,
+      labels,
       cloud: true,
       version: 2,
       revision,

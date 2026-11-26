@@ -263,6 +263,65 @@ response = await api.onRequestGet({ request: request('/api/meta'), env });
 const meta2 = await response.json();
 check('寫入商品後 revision 會變', meta2.productsRevision !== beforeRev, `${beforeRev} → ${meta2.productsRevision}`);
 
+console.log('\n=== 7e. R2 大表快取（重複開頁不再掃 D1） ===');
+const cacheProductCount = (await db.prepare('SELECT COUNT(*) AS n FROM products').first()).n;
+const cacheLabelCount = (await db.prepare('SELECT COUNT(*) AS n FROM labels').first()).n;
+
+// 暖機：讓快取與目前 revision 對齊
+await api.onRequestGet({ request: request('/api/bootstrap'), env });
+check('商品表已快取到 R2', Boolean(await r2.get('cache/products.json')), 'cache/products.json');
+check('標籤表已快取到 R2', Boolean(await r2.get('cache/labels.json')), 'cache/labels.json');
+
+// 用 Proxy 包住 D1，數「掃了商品表 / 標籤表幾次」
+function countingEnv() {
+  const counter = { products: 0, labels: 0 };
+  const proxy = new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'prepare') {
+        return sql => {
+          const text = String(sql);
+          if (/FROM products/i.test(text)) counter.products += 1;
+          if (/FROM labels/i.test(text)) counter.labels += 1;
+          return target.prepare(sql);
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+  return { counter, env: { ...env, DB: proxy } };
+}
+
+const warm = countingEnv();
+const warmBoot = await (await api.onRequestGet({ request: request('/api/bootstrap'), env: warm.env })).json();
+check('暖機後開頁完全不掃商品表（省下 22,481 列讀取）', warm.counter.products === 0, `${warm.counter.products} 次商品表查詢`);
+check('暖機後開頁完全不掃標籤表', warm.counter.labels === 0, `${warm.counter.labels} 次標籤表查詢`);
+check('快取內容與 D1 一致', warmBoot.products.length === cacheProductCount && warmBoot.labels.length === cacheLabelCount,
+  `${warmBoot.products.length}/${cacheProductCount} 商品、${warmBoot.labels.length}/${cacheLabelCount} 標籤`);
+
+const labelHit = countingEnv();
+await api.onRequestGet({ request: request('/api/labels'), env: labelHit.env });
+await api.onRequestGet({ request: request('/api/labels'), env: labelHit.env });
+check('/api/labels 連兩次都走快取', labelHit.counter.labels === 0, `${labelHit.counter.labels} 次標籤表查詢`);
+
+// 快取 revision 不符（例如使用者改了資料）→ 必須忽略快取、重讀 D1，不能給舊資料
+await r2.put('cache/labels.json', JSON.stringify({ revision: 'stale-revision', rows: [] }));
+const mismatch = countingEnv();
+const mismatchBody = await (await api.onRequestGet({ request: request('/api/labels'), env: mismatch.env })).json();
+check('快取 revision 不符會被忽略並重讀 D1', mismatch.counter.labels >= 1 && mismatchBody.labels.length === cacheLabelCount,
+  `${mismatch.counter.labels} 次查詢、回 ${mismatchBody.labels.length} 筆`);
+
+// 快取物件不見了 → 自動重建，功能不受影響
+await r2.delete('cache/products.json');
+const cold = countingEnv();
+const coldBoot = await (await api.onRequestGet({ request: request('/api/bootstrap'), env: cold.env })).json();
+check('快取不見時自動重建商品表', cold.counter.products >= 1 && coldBoot.products.length === cacheProductCount,
+  `${cold.counter.products} 次查詢、回 ${coldBoot.products.length} 筆`);
+await new Promise(resolve => setTimeout(resolve, 50));
+const rewarm = countingEnv();
+await api.onRequestGet({ request: request('/api/bootstrap'), env: rewarm.env });
+check('重建後又回到 0 次商品表查詢', rewarm.counter.products === 0, `${rewarm.counter.products} 次`);
+
 /* 8. health */
 response = await api.onRequestGet({ request: request('/api/health'), env });
 const health = await response.json();

@@ -1300,3 +1300,30 @@ Excel 裡已移除的商品**雲端不會刪**（本機刪了，下次 bootstrap
 （`api-integration` 新增 §5c 6 項驗證這個自動修正。）
 
 `sw-v6.js` → `v21`。
+
+---
+
+## 24. D1 免費額度救回：商品表／標籤表搬到 R2 快取
+
+**為什麼會爆**：免費額度是「每日 500 萬列**讀取**」。每次開頁若真的掃商品表，就是 22,481 列
+（500 萬 ÷ 22,481 ≈ 222 次/天）。不是容量問題（資料只有幾 MB），是讀取放大。
+
+**做法（`functions/api/[[path]].js`）**
+
+- 新增 `loadProducts()` / `loadLabels()`：查詢結果以 `cache/products.json`、`cache/labels.json`
+  存在 R2，物件內含產生時的 revision；讀取前先用 `meta`（2 列）比對 revision，
+  相符就直接回 R2，**完全不碰 D1**。
+- revision 不符 → 重掃一次 D1 並覆寫快取（只有匯入／改資料那一次要付全額）。
+- 快取遺失／R2 異常 → 自動退回直接查 D1，功能不受影響。
+- 「清除雲端資料」只處理 `labels/` 前綴，不會誤刪 `cache/`，也不會因為快取而漏刪檔案。
+
+**實測**（`api-integration` §7e，用 Proxy 包 D1 直接數查詢次數）：
+暖機後開頁 **0 次商品表查詢、0 次標籤表查詢**；revision 不符會自動重讀；快取刪掉會自動重建。
+
+**測試**：`api-integration` **78/78**、label-edit **152/152**、filetype **30/30**、
+ui-smoke 全部、match-engine 23/23、excel-diff 24/24、cloud 全部。
+
+**評估文件**：`/home/user/deliverable/d1-vs-turso-assessment.md`（Turso／Supabase／Neon 免費額度比較、
+遷移工時 4～5 小時、風險清單、建議先觀察一週）。
+
+`/api/health` 的 `build` 改成 `r2-cache-1`，用來確認正式站已換版。
