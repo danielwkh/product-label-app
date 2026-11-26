@@ -160,10 +160,12 @@ export async function onRequestGet({ request, env, context }) {
       try {
         await ensureSchema(env);
         await ensureSchema(env);
-        const meta = await readMeta(env, ['products_revision', 'labels_revision']);
+        const meta = await readMeta(env, ['products_revision', 'labels_revision', 'mime_fix_0006']);
         out.productsRevision = meta.products_revision || '0';
         out.labelsRevision = meta.labels_revision || '0';
         out.metaTable = Boolean(meta.products_revision);
+        // 舊資料 mime 是否已修正（migrations/0006）：done / pending
+        out.mimeFix = meta.mime_fix_0006 === '1' ? 'done' : 'pending';
       } catch (err) {
         // 分兩種情況：
         //   1) 只是 meta 表還沒建立（例如額度不足導致 DDL 失敗）→ 服務仍可用，bootstrap 照常

@@ -201,6 +201,8 @@ await db.prepare("DELETE FROM labels WHERE id = 'legacy-wdfx-1'").run();
 
 const flagRow = await db.prepare("SELECT value FROM meta WHERE key = 'mime_fix_0006'").first();
 check('記錄旗標，之後不會重複全表改寫', flagRow && flagRow.value === '1', flagRow && flagRow.value);
+const healthAfter = await (await fresh.onRequestGet({ request: request('/api/health'), env })).json();
+check('/api/health 會回報 mimeFix 狀態（可在正式站確認遷移做完）', healthAfter.mimeFix === 'done', healthAfter.mimeFix);
 
 /* 6. 批次同步配對 */
 console.log('\n=== 6. 批次同步 174 筆配對 ===');
