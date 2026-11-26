@@ -57,6 +57,8 @@ const D1_BATCH_SIZE = 50;
 let schemaReady = false;
 let schemaError = null;
 
+const BUILD = 'mime-fix-1';
+
 const isQuotaError = message => /exceeded|free tier|row read|daily|1101|quota/i.test(String(message || ''));
 
 async function ensureMetaTable(env) {
@@ -155,7 +157,7 @@ export async function onRequestGet({ request, env, context }) {
   if (url.pathname.endsWith('/api/health')) {
     // 注意：這裡刻意不用 COUNT(*)（會全表掃描，22,481 列的商品表每次要燒 22,481 次 row read）。
     // 只讀 revision 這種單列資料，成本固定。
-    const out = { ok: true, d1: Boolean(env.DB), r2: Boolean(env.LABELS), time: now() };
+    const out = { ok: true, build: BUILD, d1: Boolean(env.DB), r2: Boolean(env.LABELS), time: now() };
     if (env.DB) {
       try {
         await ensureSchema(env);
