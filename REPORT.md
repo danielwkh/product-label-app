@@ -1327,3 +1327,20 @@ ui-smoke 全部、match-engine 23/23、excel-diff 24/24、cloud 全部。
 遷移工時 4～5 小時、風險清單、建議先觀察一週）。
 
 `/api/health` 的 `build` 改成 `r2-cache-1`，用來確認正式站已換版。
+
+
+---
+
+## 25. 驗證：電腦上改標籤名 → 其他裝置看得到
+
+`api-integration` 新增 §7f（5 項）：
+
+- PATCH 改名成功，且 **`labels_revision` 會遞增**（其他裝置就是靠這個知道要更新）；
+- 模擬手機開頁走 `/api/labels` → **拿到的是新名字**（R2 快取不會回舊資料）；
+- 改名不會動到商品名稱／條碼（只改標籤）；
+- 雲端寫入失敗時，用 `labels/sync` 帶 `nameFromFile` 補送有效（離線改名不會消失）。
+
+`api-integration` **83/83**。
+
+**正式站狀態（2026-11-27 00:26 UTC）**：`ok:true`、`mimeFix:"done"`、`build:"r2-cache-1"`；
+`/api/labels` 回 314 筆（**187 octet-stream / 127 application/pdf**），舊資料的 mime 已自動修正完成。

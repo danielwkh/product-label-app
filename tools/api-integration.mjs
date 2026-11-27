@@ -322,6 +322,36 @@ const rewarm = countingEnv();
 await api.onRequestGet({ request: request('/api/bootstrap'), env: rewarm.env });
 check('重建後又回到 0 次商品表查詢', rewarm.counter.products === 0, `${rewarm.counter.products} 次`);
 
+console.log('\n=== 7f. 電腦改名 → 其他裝置（手機）真的看得到 ===');
+const renameTarget = uploaded[0].id;
+const revBeforeDesktopRename = (await (await api.onRequestGet({ request: request('/api/meta'), env })).json()).labelsRevision;
+const desktopRenameRes = await api.onRequestPatch({
+  request: request(`/api/labels/${encodeURIComponent(renameTarget)}`, { method: 'PATCH', ...json({ nameFromFile: '電腦改的名字' }) }),
+  env
+});
+check('電腦改名成功（PATCH）', desktopRenameRes.status === 200, String(desktopRenameRes.status));
+const metaAfterDesktopRename = await (await api.onRequestGet({ request: request('/api/meta'), env })).json();
+check('改名會遞增 labels_revision（其他裝置才會知道要更新）',
+  metaAfterDesktopRename.labelsRevision !== revBeforeDesktopRename, `${revBeforeDesktopRename} → ${metaAfterDesktopRename.labelsRevision}`);
+
+// 模擬「手機打開網站」：走 /api/labels（會先看 R2 快取，revision 已變 → 必須拿到新名字）
+const phoneLabelView = await (await api.onRequestGet({ request: request('/api/labels'), env })).json();
+const phoneLabelRow = phoneLabelView.labels.find(l => l.id === renameTarget);
+check('手機開頁看到的是新名字（R2 快取沒有給舊資料）', phoneLabelRow && phoneLabelRow.nameFromFile === '電腦改的名字', phoneLabelRow && phoneLabelRow.nameFromFile);
+
+// 改名不會動到商品名稱或條碼
+const productsAfterDesktopRename = await (await api.onRequestGet({ request: request('/api/bootstrap'), env })).json();
+check('改名沒有改到任何商品名稱／條碼', productsAfterDesktopRename.products.length === cacheProductCount,
+  `${productsAfterDesktopRename.products.length} 商品`);
+
+// 離線改名（雲端寫入失敗）也只能靠佇列補送：這裡驗證 labels/sync 帶 nameFromFile 可以補上
+await api.onRequestPost({
+  request: request('/api/labels/sync', json({ labels: [{ id: renameTarget, nameFromFile: '補送的名字' }] })),
+  env
+});
+const rescued = await db.prepare('SELECT name_from_file AS n FROM labels WHERE id = ?').bind(renameTarget).first();
+check('雲端失敗後用 labels/sync 補送改名有效', rescued.n === '補送的名字', rescued.n);
+
 /* 8. health */
 response = await api.onRequestGet({ request: request('/api/health'), env });
 const health = await response.json();
