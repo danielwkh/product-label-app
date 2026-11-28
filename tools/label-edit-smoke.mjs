@@ -821,6 +821,98 @@ debugApp.state.labels = savedLabels;
 debugApp.state.pendingLabelSync = savedPending;
 debugApp.state.tombstones = savedTomb;
 
+/* ------------------------------------------- 18. 待確認 → 採用建議 / 批次確認 */
+console.log('\n=== 18. 待確認的「採用建議」與批次確認 ===');
+const debugApp2 = window.app;
+const savedLabels2 = state.labels;
+const savedProducts2 = state.products;
+
+state.products = [
+  { id: 9001, name: '達利園瑞士卷 草莓味 240g', barcode: '6900', barcode2: '', labelId: null },
+  { id: 9002, name: '佳得樂 600ml', barcode: '6901', barcode2: '', labelId: null },
+  { id: 9003, name: '佳得樂 330ml', barcode: '6902', barcode2: '', labelId: null }
+];
+state.labels = {
+  'rv-1': {
+    id: 'rv-1', filename: '草莓卷.wdfx', nameFromFile: '達利園瑞士卷草莓味', hash: 'h-rv1',
+    productId: 9001, matchedProductName: '達利園瑞士卷 草莓味 240g', matchSource: 'auto',
+    matchScore: 420, matchConfidence: 'review', matchGap: 60, matchWhy: '名稱互相包含（忽略重量）'
+  },
+  'rv-size': {
+    id: 'rv-size', filename: '佳得樂.wdfx', nameFromFile: '佳得樂 330ml', hash: 'h-rv2',
+    productId: 9002, matchedProductName: '佳得樂 600ml', matchSource: 'auto',
+    matchScore: 300, matchConfidence: 'review', matchGap: 20, matchWhy: '名稱相同（忽略重量）、重量／容量不同'
+  },
+  'no-sug': {
+    id: 'no-sug', filename: '不知道.wdfx', nameFromFile: '不知道', hash: 'h-rv3',
+    productId: null, matchedProductName: null, matchSource: null, matchConfidence: 'low', matchWhy: null
+  }
+};
+state.matchFilter = 'all';
+debugApp2.renderMatchList();
+await wait(20);
+
+check('「待確認」可採用建議的筆數 = 2', document.getElementById('acceptCount').textContent === '2',
+  document.getElementById('acceptCount').textContent);
+check('「規格不同」只挑出重量／容量不同的那筆', document.getElementById('sizeReviewCount').textContent === '1',
+  document.getElementById('sizeReviewCount').textContent);
+check('列表上有「✅ 採用建議」按鈕', Boolean(document.querySelector('#matchList button[data-action="accept"][data-id="rv-1"]')));
+check('未配對的標籤不會有「採用建議」按鈕', !document.querySelector('#matchList button[data-action="accept"][data-id="no-sug"]'));
+
+// 規格不同篩選
+document.querySelector('.filter-btn[data-filter="sizereview"]').dispatchEvent(new window.Event('click'));
+await wait(20);
+const sizeRows = [...document.querySelectorAll('#matchList .label-item')];
+check('切到「規格不同」只顯示 1 筆', sizeRows.length === 1, `${sizeRows.length}`);
+check('那一筆就是 330ml 被配到 600ml 的', /佳得樂/.test(document.getElementById('matchList').textContent));
+document.querySelector('.filter-btn[data-filter="all"]').dispatchEvent(new window.Event('click'));
+await wait(20);
+
+// 單筆採用建議
+const acceptBtn = document.querySelector('#matchList button[data-action="accept"][data-id="rv-1"]');
+acceptBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(80);
+check('採用建議後變成人工鎖定', state.labels['rv-1'].matchSource === 'manual', state.labels['rv-1'].matchSource);
+check('採用建議後不再標「待確認」', state.labels['rv-1'].matchConfidence === 'high', state.labels['rv-1'].matchConfidence);
+check('採用建議後記錄「人工確認」', /人工確認/.test(state.labels['rv-1'].matchWhy || ''), state.labels['rv-1'].matchWhy);
+check('商品被連結到這個標籤', state.products.find(p => p.id === 9001).labelId === 'rv-1',
+  String(state.products.find(p => p.id === 9001).labelId));
+check('列表改顯示「人工鎖定」', /人工鎖定/.test(document.getElementById('matchList').textContent));
+
+// 批次確認：勾選 3 筆（1 筆有建議、1 筆未配對、1 筆已人工）→ 只處理有建議的
+state.selectedLabelIds.clear();
+state.selectedLabelIds.add('rv-size');
+state.selectedLabelIds.add('no-sug');
+state.selectedLabelIds.add('rv-1');
+const bulkResult = await debugApp2.acceptSelectedSuggestions([...state.selectedLabelIds]);
+check('批次確認只處理「有建議」的那 1 筆', bulkResult.done === 1, `done=${bulkResult.done} skipped=${bulkResult.skipped}`);
+check('未配對的標籤沒有被亂配（仍是未配對）', state.labels['no-sug'].productId === null
+  && state.labels['no-sug'].matchSource === null, String(state.labels['no-sug'].productId));
+check('規格不同那筆也鎖成人工（使用者確認過就是確認）', state.labels['rv-size'].matchSource === 'manual',
+  state.labels['rv-size'].matchSource);
+check('確認後「待確認」數字歸零', document.getElementById('acceptCount').textContent === '0',
+  document.getElementById('acceptCount').textContent);
+
+// 沒有建議的標籤呼叫單筆採用 → 回 false（不能亂配）
+const noSugResult = await debugApp2.acceptSuggestion('no-sug');
+check('未配對的標籤呼叫「採用建議」會被拒絕', noSugResult === false, String(noSugResult));
+
+// 確認（人工鎖定）之後，批次重新配對不可以覆蓋它
+state.selectedLabelIds.clear();
+state.selectedLabelIds.add('rv-1');
+window.app.matcher.setProducts(state.products);
+document.getElementById('bulkRematchBtn').dispatchEvent(new window.Event('click', { bubbles: true }));
+await wait(120);
+check('批次重新配對會跳過已人工確認的標籤', state.labels['rv-1'].matchSource === 'manual'
+  && state.labels['rv-1'].matchWhy === '人工確認（採用系統建議）', `${state.labels['rv-1'].matchSource} / ${state.labels['rv-1'].matchWhy}`);
+check('跳過時會告知使用者（不是默默不動）', /人工|略過|跳過/.test(document.getElementById('pdfStatus').textContent
+  + document.getElementById('toast').textContent), document.getElementById('pdfStatus').textContent);
+state.selectedLabelIds.clear();
+
+state.labels = savedLabels2;
+state.products = savedProducts2;
+state.selectedLabelIds.clear();
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

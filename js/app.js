@@ -22,7 +22,8 @@ import {
   digits,
   barcodeTail6,
   isBarcodeQuery,
-  barcodeMatchesTail
+  barcodeMatchesTail,
+  sizeConflict
 } from './core/text.js';
 import { createJobsView, formatBytes } from './ui/jobs-view.js';
 import { labelKind, extFromName, stripExtension } from './core/filetype.js';
@@ -2139,6 +2140,7 @@ function renderMatchList() {
     switch (state.matchFilter) {
       case 'matched': return Boolean(l.matchedProductName);
       case 'review': return l.matchConfidence === 'review';
+      case 'sizereview': return isSizeReview(l);
       case 'unmatched': return !l.matchedProductName && !l.deferred;
       case 'deferred': return Boolean(l.deferred);
       case 'dup': return dups.has(l.id);
@@ -2197,6 +2199,11 @@ function renderMatchList() {
     + (deferredTotal ? ` · 已延後 ${deferredTotal}` : '')
     + (dupExtras.length ? ` · 重複 ${dupGroups} 組（多出 ${dupExtras.length} 筆）` : '');
 
+  const sizeReviewCountEl = $('sizeReviewCount');
+  if (sizeReviewCountEl) sizeReviewCountEl.textContent = String(all.filter(isSizeReview).length);
+  const acceptCountEl = $('acceptCount');
+  if (acceptCountEl) acceptCountEl.textContent = String(all.filter(hasSuggestion).length);
+
   const dupCountEl = $('dupCount');
   if (dupCountEl) dupCountEl.textContent = String(dupExtras.length);
   const banner = $('dupBanner');
@@ -2250,6 +2257,7 @@ function renderMatchList() {
           ? `<button class="btn btn-outline btn-sm" data-action="unlink" data-id="${escapeHtml(l.id)}">解除配對</button>
              <button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">重新配對</button>`
           : `<button class="btn btn-primary btn-sm" data-action="match" data-id="${escapeHtml(l.id)}">手動配對</button>`}
+        ${l.matchConfidence === 'review' && l.productId ? `<button class="btn btn-primary btn-sm" data-action="accept" data-id="${escapeHtml(l.id)}">✅ 採用建議</button>` : ''}
         <button class="btn btn-outline btn-sm" data-action="preview" data-id="${escapeHtml(l.id)}">預覽</button>
         <button class="btn btn-outline btn-sm" data-action="${l.deferred ? 'undefer' : 'defer'}" data-id="${escapeHtml(l.id)}">${l.deferred ? '↩️ 取消延後' : '⏳ 稍後處理'}</button>
         <button class="btn btn-outline btn-sm" data-action="edit" data-id="${escapeHtml(l.id)}">✏️ 編輯</button>
@@ -2381,6 +2389,72 @@ async function confirmMatch(productId) {
   updateStats();
   renderMatchList();
   toast(`已配對：${product.name}`);
+}
+
+/** 「待確認」而且規格（重量／容量）跟建議商品不同 → 這批最不該盲點確認 */
+function isSizeReview(label) {
+  if (!label || label.matchConfidence !== 'review') return false;
+  if (/重量／容量不同/.test(label.matchWhy || '')) return true;
+  try {
+    return sizeConflict(label.nameFromFile || label.filename || '', label.matchedProductName || '');
+  } catch { return false; }
+}
+
+/** 待確認的標籤是否「有建議可以採用」 */
+function hasSuggestion(label) {
+  return Boolean(label && label.matchConfidence === 'review' && label.productId && label.matchedProductName);
+}
+
+/**
+ * 採用系統建議：把「待確認」的建議配對鎖成人工配對。
+ * 鎖成人工（matchSource = 'manual'）之後，之後自動／批次重新配對都不會再改動它。
+ */
+async function acceptSuggestion(id) {
+  const label = state.labels[id];
+  if (!label) return false;
+  if (!label.productId || !label.matchedProductName) return false;
+
+  const product = state.products.find(p => p.id === label.productId) || null;
+  for (const p of state.products) {
+    if (p.id !== label.productId && p.labelId === label.id) p.labelId = null;
+  }
+  if (product) {
+    product.labelId = label.id;
+    label.matchedProductName = product.name;
+  }
+  label.matchSource = 'manual';
+  label.matchConfidence = 'high';
+  label.matchScore = null;
+  label.matchGap = null;
+  label.matchWhy = '人工確認（採用系統建議）';
+  label.updatedAt = nowISO();
+
+  await persistLabelEverywhere(label);
+  if (product) {
+    try { await db.putProducts([product]); } catch (err) { console.warn('[match] 商品連結儲存失敗', err); }
+  }
+  return true;
+}
+
+/** 批次採用：只處理「有建議」的，未配對的不會被亂配 */
+async function acceptSelectedSuggestions(ids) {
+  const targets = (ids || []).map(id => state.labels[id]).filter(Boolean);
+  const usable = targets.filter(hasSuggestion);
+  let done = 0;
+  for (const label of usable) {
+    try {
+      if (await acceptSuggestion(label.id)) done += 1;
+    } catch (err) {
+      console.warn('[match] 採用建議失敗', label.id, err);
+    }
+  }
+  if (done) {
+    matcher.setManualLabelIds(manualLabelIdSet());
+    updateStats();
+    renderMatchList();
+    syncMatchMetadata().catch(() => {});
+  }
+  return { done, skipped: targets.length - done };
 }
 
 async function unlinkLabel(id) {
@@ -2835,6 +2909,16 @@ function bindEvents() {
       if (action === 'preview') previewLabel(id);
       else if (action === 'match') openMatchModal(id);
       else if (action === 'unlink') unlinkLabel(id);
+      else if (action === 'accept') {
+        acceptSuggestion(id).then(ok => {
+          if (!ok) { toast('這筆沒有可採用的建議，請按「手動配對」'); return; }
+          matcher.setManualLabelIds(manualLabelIdSet());
+          updateStats();
+          renderMatchList();
+          toast('已採用建議（人工鎖定，之後自動配對不會再改）');
+          syncMatchMetadata().catch(() => {});
+        });
+      }
       else if (action === 'defer') { setDeferred([id], true).then(() => toast('已移到清單最後面')); }
       else if (action === 'undefer') { setDeferred([id], false).then(() => toast('已移回清單')); }
       else if (action === 'edit') openEditLabelModal(id);
@@ -2885,6 +2969,31 @@ function bindEvents() {
     renderMatchList();
   });
 
+  const bulkAcceptBtn = $('bulkAcceptBtn');
+  if (bulkAcceptBtn) {
+    bulkAcceptBtn.addEventListener('click', async () => {
+      const ids = [...state.selectedLabelIds];
+      if (!ids.length) {
+        toast('請先勾選要確認的項目');
+        return;
+      }
+      bulkAcceptBtn.disabled = true;
+      try {
+        const { done, skipped } = await acceptSelectedSuggestions(ids);
+        if (!done) {
+          toast('所選的項目都沒有「可採用的建議」，請用「手動配對」');
+          return;
+        }
+        state.selectedLabelIds.clear();
+        updateSelectionUI([]);
+        renderMatchList();
+        toast(skipped ? `已確認 ${done} 筆；${skipped} 筆沒有建議所以略過` : `已確認 ${done} 筆（人工鎖定）`);
+      } finally {
+        bulkAcceptBtn.disabled = false;
+      }
+    });
+  }
+
   $('bulkRematchBtn').addEventListener('click', async () => {
     const ids = [...state.selectedLabelIds];
     if (!ids.length) {
@@ -2908,6 +3017,7 @@ function bindEvents() {
       batch.push(label);
     }
     showStatus('pdfStatus', `重新配對 ${batch.length} 項…`);
+    const allUpdates = [];
     for (let i = 0; i < batch.length; i += 20) {
       const slice = batch.slice(i, i + 20);
       const items = slice.map(l => ({ key: l.id, name: l.nameFromFile || l.filename, labelId: l.id }));
@@ -2943,6 +3053,7 @@ function bindEvents() {
         updates.push(label);
       }
       await db.putLabels(updates);
+      allUpdates.push(...updates);
       await yieldMain();
     }
     await db.putProducts(state.products);
@@ -2950,7 +3061,9 @@ function bindEvents() {
     matcher.setManualLabelIds(manualLabelIdSet());
     updateStats();
     renderMatchList();
-    await markLabelDirty(updates.map(label => label.id));
+    // 以前這裡用到迴圈內的 updates（超出作用域）→ 直接丟錯，
+    // 導致「配對改好了但沒有標記待上傳、也沒有提示」，雲端看起來就沒更新。
+    if (allUpdates.length) await markLabelDirty(allUpdates.map(label => label.id));
     if (state.cloudEnabled) await syncMatchMetadata();
     showStatus('pdfStatus', `已重新配對 ${changed} 項${skipped ? `；跳過人工鎖定 ${skipped} 項` : ''}`
       + (pendingCount() ? `（${pendingCount()} 筆待上傳）` : ''));
@@ -3372,6 +3485,10 @@ window.app = {
   syncAllToCloud,
   getLabelBlob,
   mergeRemoteLabels,
+  acceptSuggestion,
+  acceptSelectedSuggestions,
+  isSizeReview,
+  hasSuggestion,
   applyRemoteDeletions,
   humanizeCloudError,
   // 標籤編輯 / 重複管理（測試與除錯用）
