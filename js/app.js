@@ -61,13 +61,24 @@ const state = {
 /** 把技術錯誤翻成人話（使用者看到「API 500」根本不知道要等還是要修） */
 function humanizeCloudError(message) {
   const raw = String(message || '');
-  if (/exceeded D1|free tier daily row read limit/i.test(raw)) {
-    return '雲端資料庫今日額度已用完（香港時間每天早上 8:00 重置；或升級 Cloudflare Workers Paid 就沒有這個限制）';
+  // 順序很重要：先講「真正原因」，再退回一般說法。
+  if (/exceeded D1|free tier daily row read limit|row read limit/i.test(raw)) {
+    return '雲端資料庫今日額度已用完（香港時間每天早上 8:00 自動重置；這不是你的操作錯誤，稍後再按一次就好）';
   }
-  if (/D1 binding DB is not configured/i.test(raw)) return '雲端資料庫尚未設定（D1 binding 缺失）';
-  if (/quota|storage/i.test(raw) && /browser|本機/i.test(raw)) return '本機儲存空間不足';
-  if (/network|fetch|Failed to fetch/i.test(raw)) return '連不上網路（或 Cloudflare 暫時不可用）';
-  if (/^雲端 API 500$|\b500\b/.test(raw)) return `雲端伺服器錯誤（500）：${raw}`;
+  if (/too many.*write|rows written|daily write/i.test(raw)) {
+    return '雲端今日「寫入」次數已用完（例如今天匯入了太多次 Excel）。香港時間早上 8:00 重置';
+  }
+  if (/D1 binding DB is not configured/i.test(raw)) return '雲端資料庫還沒設定好（D1 未綁定），請通知管理員';
+  if (/R2 binding LABELS is not configured/i.test(raw)) return '雲端檔案儲存還沒設定好（R2 未綁定），請通知管理員';
+  if (/not found in R2|檔案不存在於雲端儲存/i.test(raw)) return '這個標籤的檔案不在雲端儲存（可能已被刪除或只存在本機）';
+  if (/quota|storage/i.test(raw) && /browser|本機/i.test(raw)) return '本機瀏覽器儲存空間不足';
+  if (/network|fetch|Failed to fetch|連不上/i.test(raw)) return '連不上網路（或 Cloudflare 暫時不可用），稍後會自動補送';
+  if (/401|403|unauthorized|forbidden/i.test(raw)) return '雲端拒絕了這次請求（權限或金鑰問題），請通知管理員';
+  if (/\b5\d\d\b|API 500|伺服器錯誤/i.test(raw)) {
+    // 伺服器沒回原因時，不要只丟一個 500 給操作員
+    return '雲端暫時出錯（常見原因是今日額度用完或 Cloudflare 忙碌）。稍後再按一次「同步」；若持續出現，開 /api/health 看實際原因';
+  }
+  if (/\b429\b/.test(raw)) return '雲端請求太頻繁，請等一分鐘再試';
   return raw;
 }
 
@@ -536,7 +547,7 @@ async function flushTombstones() {
     } catch (err) {
       console.warn('[labels] 重試雲端刪除失敗', err);
       const remaining = ids.length - confirmed;
-      showStatus('cloudStatus', `還有 ${remaining} 個已刪除的標籤卡在雲端：${err.message}（下次同步會再試）`, 'error');
+      showStatus('cloudStatus', `還有 ${remaining} 個已刪除的標籤卡在雲端：${humanizeCloudError(err.message)}（下次同步會再試）`, 'error');
       break;
     }
   }
@@ -867,7 +878,7 @@ async function syncAllToCloud() {
     showStatus('cloudStatus', `同步完成：${parts.join('、')}`);
     toast('雲端同步完成');
   } catch (err) {
-    showStatus('cloudStatus', `同步失敗：${err.message}`, 'error');
+    showStatus('cloudStatus', `同步失敗：${humanizeCloudError(err.message)}`, 'error');
   } finally {
     state.cloudSyncing = false;
     if (button) button.disabled = false;
@@ -1052,7 +1063,7 @@ async function applyExcelDiff(products, diff, options = {}) {
       try {
         await api.productsBulk(list.slice(i, i + 200), { replace: false });
       } catch (err) {
-        status(`本機已更新，雲端商品同步失敗：${err.message}`, 'error');
+        status(`本機已更新，雲端商品同步失敗：${humanizeCloudError(err.message)}`, 'error');
         return;
       }
     }
@@ -1062,7 +1073,7 @@ async function applyExcelDiff(products, diff, options = {}) {
         try {
           await api.productsDelete(ids.slice(i, i + 250));
         } catch (err) {
-          status(`本機已更新，雲端刪除失敗：${err.message}`, 'error');
+          status(`本機已更新，雲端刪除失敗：${humanizeCloudError(err.message)}`, 'error');
           return;
         }
       }
@@ -2036,7 +2047,7 @@ async function runClearCloud() {
     if (window.app && typeof window.app.reloadCloud === 'function') window.app.reloadCloud();
   } catch (err) {
     toast(`清除失敗：${err.message}`);
-    showStatus('cloudStatus', `清除失敗：${err.message}`, 'error');
+    showStatus('cloudStatus', `清除失敗：${humanizeCloudError(err.message)}`, 'error');
   } finally {
     button.disabled = false;
     button.textContent = '確定清除';
@@ -2290,7 +2301,7 @@ async function persistLabelEverywhere(label) {
       });
       await clearLabelDirty([label.id]);
     } catch (err) {
-      toast(`已存本機；雲端暫時不可用，已記錄待上傳（${err.message}）`);
+      toast(`已存本機；雲端暫時不可用，已記錄待上傳（${humanizeCloudError(err.message)}）`);
     }
   }
 }
@@ -3305,6 +3316,7 @@ window.app = {
   doSearch,
   syncAllToCloud,
   getLabelBlob,
+  humanizeCloudError,
   // 標籤編輯 / 重複管理（測試與除錯用）
   renderMatchList,
   deleteLabels,

@@ -755,6 +755,22 @@ check('下載提示會說明如何用微打開啟',
 window.HTMLAnchorElement.prototype.click = originalClick2;
 globalThis.URL.createObjectURL = originalCreate2;
 
+/* --------------------------------------------- 16. 錯誤訊息要講人話 */
+console.log('\n=== 16. 雲端錯誤訊息不可以只丟「API 500」 ===');
+const h = window.app.humanizeCloudError;
+const quotaMsg = h('D1_ERROR: Your account has exceeded D1\'s free tier daily row read limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue.');
+check('額度用完要說「額度」和重置時間', /額度/.test(quotaMsg) && /8:00/.test(quotaMsg), quotaMsg);
+check('額度訊息不可以出現技術錯誤碼', !/D1_ERROR|exceeded/i.test(quotaMsg), quotaMsg);
+
+const bare500 = h('雲端回應 500');
+check('只有 500 時要說明可能原因與下一步', /額度|忙碌/.test(bare500) && /同步/.test(bare500), bare500);
+check('只有 500 時不可以只回「500」', !/^雲端伺服器錯誤（500）/.test(bare500), bare500);
+
+check('寫入額度用完要說清楚是「寫入」', /寫入/.test(h('D1_ERROR: daily write limit exceeded')), h('D1_ERROR: daily write limit exceeded'));
+check('連不上網路要說會自動補送', /自動補送/.test(h('Failed to fetch')), h('Failed to fetch'));
+check('R2 沒綁定要說「檔案儲存」', /檔案儲存/.test(h('R2 binding LABELS is not configured')), h('R2 binding LABELS is not configured'));
+check('一般錯誤原樣保留（不要亂翻譯）', h('名稱不能空白') === '名稱不能空白', h('名稱不能空白'));
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

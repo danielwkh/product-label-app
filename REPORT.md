@@ -1344,3 +1344,22 @@ ui-smoke 全部、match-engine 23/23、excel-diff 24/24、cloud 全部。
 
 **正式站狀態（2026-11-27 00:26 UTC）**：`ok:true`、`mimeFix:"done"`、`build:"r2-cache-1"`；
 `/api/labels` 回 314 筆（**187 octet-stream / 127 application/pdf**），舊資料的 mime 已自動修正完成。
+
+---
+
+## 26. 「雲端 API 500」這種看不懂的訊息全面改掉
+
+截圖上那行「還有 127 個已刪除的標籤卡在雲端：雲端 API 500（下次同步會再試）」是舊行為：
+把伺服器原始錯誤直接印給操作員，看不出要等還是要修。
+
+`humanizeCloudError()` 重寫，並套用到所有「雲端寫入／刪除／同步」的錯誤顯示：
+
+| 原始錯誤 | 現在顯示 |
+| --- | --- |
+| `exceeded D1's free tier daily row read limit` | 雲端資料庫今日額度已用完（香港時間每天早上 8:00 自動重置；這不是你的操作錯誤…） |
+| `daily write limit exceeded` | 雲端今日「寫入」次數已用完（例如今天匯入了太多次 Excel）… |
+| 只有 `500`（伺服器沒回原因） | 雲端暫時出錯（常見原因是今日額度用完或 Cloudflare 忙碌）。稍後再按一次「同步」；若持續出現，開 `/api/health` 看實際原因 |
+| `R2 binding LABELS is not configured` | 雲端檔案儲存還沒設定好（R2 未綁定），請通知管理員 |
+| `Failed to fetch` | 連不上網路（或 Cloudflare 暫時不可用），稍後會自動補送 |
+
+`label-edit` 新增 §16（8 項）驗證訊息品質：**160/160**。`sw-v6.js` → `v22`。
