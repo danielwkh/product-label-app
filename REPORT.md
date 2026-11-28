@@ -1363,3 +1363,32 @@ ui-smoke 全部、match-engine 23/23、excel-diff 24/24、cloud 全部。
 | `Failed to fetch` | 連不上網路（或 Cloudflare 暫時不可用），稍後會自動補送 |
 
 `label-edit` 新增 §16（8 項）驗證訊息品質：**160/160**。`sw-v6.js` → `v22`。
+
+---
+
+## 27. 「電腦刪光標籤，手機還看得到」的真正原因
+
+**症狀**：在電腦按了刪除（雲端 `/api/labels` 確認回 `[]`、`labelsRevision` 已遞增），
+但 iPhone / Android 開網頁仍然看到全部標籤。
+
+**根因**：`mergeRemoteLabels()` 是「**只新增／更新**」的合併：
+`const merged = { ...state.labels }` 然後把雲端回來的塞進去。
+雲端回空陣列時，迴圈一次都不跑 → 本機的標籤原封不動。
+也就是說 **雲端刪除從來沒有「往下」傳過**（只有「往上的刪除」有墓碑機制）。
+
+**修正（`js/app.js`）**
+
+- `mergeRemoteLabels(remoteLabels, { prune })` 回傳 `{ skipped, removed }`。
+- `prune` 時，雲端清單裡沒有的標籤會被移除，但**刻意保守**，符合以下任一條就保留：
+  1. 只存在本機、還沒上傳（`uploaded` / `remote` 都不是 true）→ 那是使用者還沒送出的東西；
+  2. 有待上傳的改名／配對（`pendingLabelSync`）→ 不能吃掉使用者的修改；
+  3. 沒有開 `prune`（一般合併）→ 一律不動。
+- 只有在「雲端回的 `labelsRevision` 與 `meta` 一致」時才允許 prune，避免拿舊清單誤刪。
+- 新增 `applyRemoteDeletions()`：一併清掉 IndexedDB 記錄、本機 Blob、商品連結（`relinkProductsFromLabels`），
+  所以重新整理不會「復活」。
+- 介面會提示「雲端已刪除 N 個標籤，已同步移除本機的備份」。
+
+**測試**：`label-edit` 新增 §17（8 項）→ **168/168**。其餘：api 83/83、filetype 30/30、ui 全部、
+match-engine 23/23、excel-diff 24/24、cloud 全部。`sw-v6.js` → `v23`。
+
+**給使用者**：手機需要重新整理一次（或重開分頁）才會套用；之後就正常了。

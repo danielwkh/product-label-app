@@ -771,6 +771,56 @@ check('連不上網路要說會自動補送', /自動補送/.test(h('Failed to f
 check('R2 沒綁定要說「檔案儲存」', /檔案儲存/.test(h('R2 binding LABELS is not configured')), h('R2 binding LABELS is not configured'));
 check('一般錯誤原樣保留（不要亂翻譯）', h('名稱不能空白') === '名稱不能空白', h('名稱不能空白'));
 
+/* ------------------------ 17. 雲端刪除要傳到其他裝置（電腦清空 → 手機跟著清空） */
+console.log('\n=== 17. 雲端刪掉的標籤，本機也要消失 ===');
+const debugApp = window.app;
+const savedLabels = debugApp.state.labels;
+const savedPending = debugApp.state.pendingLabelSync;
+const savedTomb = debugApp.state.tombstones;
+
+debugApp.state.labels = {
+  'cloud-a': { id: 'cloud-a', filename: 'a.wdfx', nameFromFile: '雲端有', uploaded: true, remote: true, hash: 'h-a' },
+  'local-b': { id: 'local-b', filename: 'b.wdfx', nameFromFile: '只在本機', uploaded: false, remote: false, hash: 'h-b' },
+  'pending-c': { id: 'pending-c', filename: 'c.wdfx', nameFromFile: '待上傳改名', uploaded: true, remote: true, hash: 'h-c' },
+  'deleted-d': { id: 'deleted-d', filename: 'd.wdfx', nameFromFile: '我已刪', uploaded: true, remote: true, hash: 'h-d' }
+};
+debugApp.state.pendingLabelSync = new Set(['pending-c']);
+debugApp.state.tombstones = { 'deleted-d': true };
+
+const pruneResult = debugApp.mergeRemoteLabels([], { prune: true });
+const pruneIds = pruneResult.removed.map(l => l.id).sort();
+check('雲端清空後，本機「雲端來的」標籤會被移除', pruneIds.includes('cloud-a'), pruneIds.join(','));
+check('自己已刪除的標籤也會一併移除（不用再等雲端）', pruneIds.includes('deleted-d'), pruneIds.join(','));
+check('只存在本機、還沒上傳的標籤不能被刪掉', !pruneIds.includes('local-b')
+  && Boolean(debugApp.state.labels['local-b']), Object.keys(debugApp.state.labels).join(','));
+check('有待上傳改動的標籤先保留（避免吃掉使用者的修改）', !pruneIds.includes('pending-c')
+  && Boolean(debugApp.state.labels['pending-c']), Object.keys(debugApp.state.labels).join(','));
+check('移除後 state.labels 只剩該留的', Object.keys(debugApp.state.labels).sort().join(',') === 'local-b,pending-c',
+  Object.keys(debugApp.state.labels).sort().join(','));
+
+// 沒有 prune 時（例如只是要合併）不可以刪任何東西
+debugApp.state.labels = {
+  'cloud-a': { id: 'cloud-a', filename: 'a.wdfx', nameFromFile: '雲端有', uploaded: true, remote: true, hash: 'h-a' }
+};
+const noPrune = debugApp.mergeRemoteLabels([], {});
+check('預設（未開啟 prune）不會移除任何標籤', noPrune.removed.length === 0 && Boolean(debugApp.state.labels['cloud-a']),
+  `${noPrune.removed.length} 筆`);
+
+// 本機 IndexedDB 也要清掉，否則重新整理又回來
+debugApp.state.products = [];
+debugApp.state.labels = {
+  'gone-1': { id: 'gone-1', filename: 'g.wdfx', nameFromFile: '要被清掉', uploaded: true, remote: true, hash: 'h-gone' }
+};
+await window.app.db.putLabel(debugApp.state.labels['gone-1']).catch(() => {});
+const removedCount = await debugApp.applyRemoteDeletions(pruneResult.removed.filter(l => l.id === 'cloud-a'));
+check('移除時會一起清掉本機的標籤記錄', removedCount === 1, String(removedCount));
+const leftover = await window.app.db.getLabel('cloud-a').catch(() => null);
+check('本機 IndexedDB 已沒有該標籤（重新整理不會復活）', !leftover, leftover ? '還在' : '(已清除)');
+
+debugApp.state.labels = savedLabels;
+debugApp.state.pendingLabelSync = savedPending;
+debugApp.state.tombstones = savedTomb;
+
 /* --------------------------------------------------------- 結果 */
 const failed = results.filter(r => !r.ok);
 console.log(`\n=== 結果：${results.length - failed.length} / ${results.length} 通過 ===`);

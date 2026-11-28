@@ -408,10 +408,12 @@ function manualLabelIdSet() {
 
 /* ------------------------------------------------------------------ 雲端 */
 
-function mergeRemoteLabels(remoteLabels) {
+function mergeRemoteLabels(remoteLabels, options = {}) {
   const merged = { ...state.labels };
   let skipped = 0;
+  const remoteIds = new Set();
   for (const remote of remoteLabels) {
+    remoteIds.add(remote.id);
     // 已刪除但雲端還沒確認的 → 不要再拉回來（等墓碑清掉）
     if (state.tombstones && state.tombstones[remote.id]) { skipped++; continue; }
     const local = merged[remote.id];
@@ -436,12 +438,51 @@ function mergeRemoteLabels(remoteLabels) {
       remote: true
     };
   }
+  // 雲端刪掉的標籤，本機也要跟著消失。
+  // 以前這裡是「只新增／更新」，所以在電腦刪光之後，手機永遠還看得到那些標籤（雲端明明是空的）。
+  // 規則刻意保守：只有「確實存在於雲端」的標籤才會被移除；
+  //   1) 只在本機、還沒上傳的 → 保留（那是使用者還沒送出去的東西）
+  //   2) 有待上傳改動（pendingLabelSync）的 → 保留
+  //   3) 在自己刪除清單（tombstones）裡的 → 直接移除，不用再等雲端
+  const removed = [];
+  if (options.prune) {
+    for (const [id, label] of Object.entries(merged)) {
+      if (remoteIds.has(id)) continue;
+      const inTombstone = Boolean(state.tombstones && state.tombstones[id]);
+      if (!label.uploaded && !label.remote && !inTombstone) continue;
+      if (state.pendingLabelSync && state.pendingLabelSync.has(id)) continue;
+      removed.push(label);
+      delete merged[id];
+    }
+  }
+
   state.labels = merged;
   for (const label of Object.values(state.labels)) {
     if (!label.uploaded) label.remote = false;
   }
   if (skipped) console.info(`[cloud] 忽略 ${skipped} 個已刪除但雲端還沒確認的標籤`);
-  return skipped;
+  if (removed.length) console.info(`[cloud] 雲端已刪除 ${removed.length} 個標籤，本機同步移除`);
+  return { skipped, removed };
+}
+
+/** 把「雲端已刪除」的標籤從本機（IndexedDB、Blob、商品連結）一起清掉 */
+async function applyRemoteDeletions(labels) {
+  if (!labels || !labels.length) return 0;
+  for (const label of labels) {
+    try {
+      await db.deleteLabelRecord(label.id);
+    } catch (err) {
+      console.warn('[cloud] 本機標籤記錄刪除失敗', label.id, err);
+    }
+    if (label.hash) {
+      const stillUsed = Object.values(state.labels).some(other => other.hash && other.hash === label.hash);
+      if (!stillUsed) {
+        try { await db.deleteBlob(label.hash); } catch (err) { console.warn('[cloud] 本機 Blob 刪除失敗', err); }
+      }
+    }
+  }
+  try { relinkProductsFromLabels(); } catch { /* ignore */ }
+  return labels.length;
 }
 
 /* --------------------------------------------------- 刪除墓碑（防「復活」） */
@@ -613,7 +654,14 @@ async function loadCloudData() {
         if (labelsChanged) {
           try {
             const labelData = await api.labelList();
-            mergeRemoteLabels(labelData.labels || []);
+            // revision 對得上才允許「移除本機已被雲端刪除的標籤」，避免拿舊清單誤刪
+            const revisionMatches = !labelData.labelsRevision
+              || String(labelData.labelsRevision) === String(meta.labelsRevision);
+            const merged = mergeRemoteLabels(labelData.labels || [], { prune: revisionMatches });
+            if (merged.removed.length) {
+              await applyRemoteDeletions(merged.removed);
+              showStatus('cloudStatus', `雲端已刪除 ${merged.removed.length} 個標籤，已同步移除本機的備份`, 'warn');
+            }
             await db.putLabels(Object.values(state.labels), 40).catch(() => {});
             await db.setMeta('cloudLabelsRevision', String(meta.labelsRevision)).catch(() => {});
           } catch (err) {
@@ -688,7 +736,13 @@ async function loadCloudData() {
       }]));
     }
 
-    mergeRemoteLabels(remoteLabels);
+    const bootstrapRevisionMatches = !data.labelsRevision
+      || String(data.labelsRevision) === String((meta && meta.labelsRevision) || data.labelsRevision);
+    const mergedLabels = mergeRemoteLabels(remoteLabels, { prune: bootstrapRevisionMatches });
+    if (mergedLabels.removed.length) {
+      await applyRemoteDeletions(mergedLabels.removed);
+      console.info(`[cloud] 雲端已刪除 ${mergedLabels.removed.length} 個標籤，本機同步移除`);
+    }
 
     pipeline.setProducts(state.products);
     pipeline.setLabels(state.labels);
@@ -3305,6 +3359,7 @@ async function boot() {
 // 全域函式（供 HTML 內既有的 inline 呼叫與除錯使用）
 window.app = {
   state,
+  db,
   reloadCloud: () => { cloudReady = loadCloudData(); return cloudReady; },
   pipeline,
   matcher,
@@ -3316,6 +3371,8 @@ window.app = {
   doSearch,
   syncAllToCloud,
   getLabelBlob,
+  mergeRemoteLabels,
+  applyRemoteDeletions,
   humanizeCloudError,
   // 標籤編輯 / 重複管理（測試與除錯用）
   renderMatchList,
